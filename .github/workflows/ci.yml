@@ -7,16 +7,16 @@ on:
   workflow_dispatch:
     inputs:
       runner:
-        description: "macOS runner（macos-latest 排队太久时换 macos-15-intel）"
+        description: "macOS runner（默认 macos-15-intel）"
         required: false
-        default: macos-latest
+        default: macos-15-intel
         type: choice
-        options: [macos-latest, macos-15-intel, macos-26-intel]
+        options: [macos-15-intel, macos-26-intel, macos-latest]
 
 jobs:
   build:
     name: Test, build and smoke (no publish)
-    runs-on: ${{ inputs.runner || 'macos-latest' }}
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 30
     env:
       TAG: v0.0.0

@@ -171,10 +171,12 @@ final class CodexLive {
 
 // MARK: Gemini（Antigravity 登录）
 
-/// Antigravity 桌面端的公开 OAuth 客户端；secret 待 PM 确认来源后填入，空时不换新令牌（显示登录过期）。
+/// Antigravity 桌面端内置的公开 OAuth 客户端（installed app）。只用于内存里换新令牌。
+/// 值不进仓库（GitHub 推送保护会拦），打包时由 scripts/build.sh 从环境变量
+/// ANTIGRAVITY_CLIENT_ID / ANTIGRAVITY_CLIENT_SECRET 写进 Info.plist；缺失时不换新，过期即提示打开 Antigravity。
 enum AntigravityOAuth {
-    static let clientID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-    static let clientSecret = ""
+    static var clientID: String { (Bundle.main.object(forInfoDictionaryKey: "LLAntigravityClientID") as? String) ?? "" }
+    static var clientSecret: String { (Bundle.main.object(forInfoDictionaryKey: "LLAntigravityClientSecret") as? String) ?? "" }
 }
 
 final class GeminiLive {
@@ -241,27 +243,24 @@ final class GeminiLive {
         #endif
     }
 
-    private func accessToken(_ c: GeminiCredential) async throws -> String {
-        if !c.isExpired(now: Date()) { return c.accessToken }
+    /// 取可用的访问令牌：没过期用文件/钥匙串里的；过期或 force（接口 401）时用 refresh_token 在内存里换新。
+    private func accessToken(_ c: GeminiCredential, force: Bool = false) async throws -> String {
+        if !force, !c.isExpired(now: Date()) { return c.accessToken }
         guard let rt = c.refreshToken, !rt.isEmpty else { throw HTTPFailure.unauthorized }
         let cached = locked { refreshed }
-        if let r = cached, r.refreshToken == rt, r.expiry.timeIntervalSinceNow > 60 { return r.access }
-        guard !AntigravityOAuth.clientSecret.isEmpty else { throw HTTPFailure.unauthorized }
-        var req = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
-        req.httpMethod = "POST"
-        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        var form = URLComponents()
-        form.queryItems = [.init(name: "grant_type", value: "refresh_token"), .init(name: "refresh_token", value: rt),
-                           .init(name: "client_id", value: AntigravityOAuth.clientID),
-                           .init(name: "client_secret", value: AntigravityOAuth.clientSecret)]
-        req.httpBody = form.percentEncodedQuery?.data(using: .utf8)
-        let d: Data
-        do { d = try await send(req) } catch { throw HTTPFailure.unauthorized }
-        guard let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
-              let at = obj["access_token"] as? String else { throw HTTPFailure.unauthorized }
-        let exp = Date().addingTimeInterval((obj["expires_in"] as? Double) ?? 3_600)
-        locked { refreshed = (rt, at, exp) }
-        return at
+        if !force, let r = cached, r.refreshToken == rt, r.expiry.timeIntervalSinceNow > 60 { return r.access }
+        do {
+            let r = try await GeminiTokenRefresh.refresh(
+                refreshToken: rt, clientID: AntigravityOAuth.clientID, clientSecret: AntigravityOAuth.clientSecret,
+                now: Date()) { req in
+                    let (d, resp) = try await URLSession.shared.data(for: req)
+                    return (d, (resp as? HTTPURLResponse)?.statusCode ?? 0)
+                }
+            locked { refreshed = (rt, r.accessToken, r.expiry) }
+            return r.accessToken
+        } catch {
+            throw HTTPFailure.unauthorized
+        }
     }
 
     private func post(_ method: String, token: String, ua: String, body: [String: Any]) async throws -> Data {
@@ -273,6 +272,34 @@ final class GeminiLive {
         r.setValue(ua, forHTTPHeaderField: "User-Agent")
         r.httpBody = try JSONSerialization.data(withJSONObject: body)
         return try await send(r)
+    }
+
+    /// 用给定令牌查套餐、邮箱和额度，结果写进 snap。
+    private func query(token: String, into snap: inout ServiceSnapshot) async throws {
+        let v = ideVersion
+        let meta: [String: Any] = ["ideName": "antigravity", "ideType": "ANTIGRAVITY", "ideVersion": v,
+                                   "pluginType": "GEMINI", "updateChannel": "stable"]
+        let assistData = try await post("loadCodeAssist", token: token, ua: "antigravity/\(v) darwin/\(arch)",
+                                        body: ["metadata": meta, "mode": "FULL_ELIGIBILITY_CHECK"])
+        let assist = GeminiAssist.parse(assistData)
+        if let p = assist?.planName { snap.plan = p }
+        if snap.email == nil {
+            var r = URLRequest(url: URL(string: "https://www.googleapis.com/oauth2/v2/userinfo")!)
+            r.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+            if let d = try? await send(r), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
+                snap.email = o["email"] as? String
+            }
+        }
+        guard let project = assist?.project else { snap.status = .fetchFailed; return }
+        let q = try await post("retrieveUserQuotaSummary", token: token,
+                               ua: "antigravity/hub/\(v) (aidev_client; os_type=darwin; arch=\(arch))",
+                               body: ["project": project])
+        if let parsed = GeminiQuota.parse(q) {
+            snap.weekly = parsed.weekly
+            snap.fiveHour = parsed.fiveHour
+        } else {
+            snap.status = .fetchFailed
+        }
     }
 
     func fetch(previous: ServiceSnapshot) async -> ServiceSnapshot {
@@ -287,30 +314,11 @@ final class GeminiLive {
         snap.status = .ok
         if let id = cred.idToken, let email = JWT.payload(id)?["email"] as? String { snap.email = email }
         do {
-            let token = try await accessToken(cred)
-            let v = ideVersion
-            let meta: [String: Any] = ["ideName": "antigravity", "ideType": "ANTIGRAVITY", "ideVersion": v,
-                                       "pluginType": "GEMINI", "updateChannel": "stable"]
-            let assistData = try await post("loadCodeAssist", token: token, ua: "antigravity/\(v) darwin/\(arch)",
-                                            body: ["metadata": meta, "mode": "FULL_ELIGIBILITY_CHECK"])
-            let assist = GeminiAssist.parse(assistData)
-            if let p = assist?.planName { snap.plan = p }
-            if snap.email == nil {
-                var r = URLRequest(url: URL(string: "https://www.googleapis.com/oauth2/v2/userinfo")!)
-                r.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
-                if let d = try? await send(r), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
-                    snap.email = o["email"] as? String
-                }
-            }
-            guard let project = assist?.project else { snap.status = .fetchFailed; return snap }
-            let q = try await post("retrieveUserQuotaSummary", token: token,
-                                   ua: "antigravity/hub/\(v) (aidev_client; os_type=darwin; arch=\(arch))",
-                                   body: ["project": project])
-            if let parsed = GeminiQuota.parse(q) {
-                snap.weekly = parsed.weekly
-                snap.fiveHour = parsed.fiveHour
-            } else {
-                snap.status = .fetchFailed
+            do {
+                try await query(token: try await accessToken(cred), into: &snap)
+            } catch HTTPFailure.unauthorized {
+                // 接口 401：在内存里换新令牌后重试一次；换新失败才算登录过期
+                try await query(token: try await accessToken(cred, force: true), into: &snap)
             }
         } catch HTTPFailure.unauthorized {
             snap.status = .loginExpired

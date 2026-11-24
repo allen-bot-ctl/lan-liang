@@ -73,6 +73,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+# Antigravity 公开 OAuth 客户端值（仓库 Secret 传入，不进仓库、不回显）；没有就不写，应用里不换新令牌。
+if [ -n "${ANTIGRAVITY_CLIENT_ID:-}" ] && [ -n "${ANTIGRAVITY_CLIENT_SECRET:-}" ]; then
+  plutil -insert LLAntigravityClientID -string "$ANTIGRAVITY_CLIENT_ID" "$APP/Contents/Info.plist"
+  plutil -insert LLAntigravityClientSecret -string "$ANTIGRAVITY_CLIENT_SECRET" "$APP/Contents/Info.plist"
+  echo "Antigravity OAuth 客户端: 已写入"
+else
+  echo "Antigravity OAuth 客户端: 未提供（Gemini 令牌过期时不换新）"
+fi
 plutil -lint "$APP/Contents/Info.plist"
 
 # 签名：有 SIGN_IDENTITY（如 "LanLiang Self-Signed"）就用稳定自签名证书，否则 ad-hoc。

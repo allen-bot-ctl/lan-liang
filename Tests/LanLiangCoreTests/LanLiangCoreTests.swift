@@ -196,3 +196,51 @@ final class FakeDataTests: XCTestCase {
         XCTAssertEqual(f.codex.subscriptionUntil, Date(timeIntervalSince1970: 1_797_062_400))
     }
 }
+
+final class GeminiRefreshTests: XCTestCase {
+    func testRefreshSuccessUsesFormAndParsesExpiry() async throws {
+        var seen: URLRequest?
+        let now = Date(timeIntervalSince1970: 1_000)
+        let r = try await GeminiTokenRefresh.refresh(refreshToken: "1//r+t", clientID: "cid", clientSecret: "sec", now: now) { req in
+            seen = req
+            return (Data(#"{"access_token":"new-at","expires_in":3599,"token_type":"Bearer"}"#.utf8), 200)
+        }
+        XCTAssertEqual(r.accessToken, "new-at")
+        XCTAssertEqual(r.expiry, now.addingTimeInterval(3599))
+        XCTAssertEqual(seen?.httpMethod, "POST")
+        XCTAssertEqual(seen?.url?.absoluteString, "https://oauth2.googleapis.com/token")
+        let body = String(data: seen?.httpBody ?? Data(), encoding: .utf8) ?? ""
+        XCTAssertTrue(body.contains("grant_type=refresh_token"))
+        XCTAssertTrue(body.contains("refresh_token=1//r%2Bt") || body.contains("refresh_token=1%2F%2Fr%2Bt"))
+        XCTAssertTrue(body.contains("client_id=cid"))
+    }
+
+    func testRefreshFailures() async {
+        let now = Date()
+        for (body, code) in [(#"{"error":"invalid_grant"}"#, 400), (#"{"token_type":"Bearer"}"#, 200), ("oops", 500)] {
+            do {
+                _ = try await GeminiTokenRefresh.refresh(refreshToken: "r", clientID: "c", clientSecret: "s", now: now) { _ in
+                    (Data(body.utf8), code)
+                }
+                XCTFail("应失败: \(code)")
+            } catch {
+                XCTAssertEqual(error as? GeminiTokenRefresh.Failed, GeminiTokenRefresh.Failed())
+            }
+        }
+        // 没有 client secret 或 refresh_token 时不发请求
+        var called = false
+        do {
+            _ = try await GeminiTokenRefresh.refresh(refreshToken: "", clientID: "c", clientSecret: "s", now: now) { _ in
+                called = true; return (Data(), 200)
+            }
+            XCTFail("应失败")
+        } catch {}
+        XCTAssertFalse(called)
+    }
+
+    func testParseDefaultExpiry() {
+        let now = Date(timeIntervalSince1970: 0)
+        XCTAssertEqual(GeminiTokenRefresh.parse(Data(#"{"access_token":"a"}"#.utf8), now: now)?.expiry, Date(timeIntervalSince1970: 3_600))
+        XCTAssertNil(GeminiTokenRefresh.parse(Data("{}".utf8), now: now))
+    }
+}
