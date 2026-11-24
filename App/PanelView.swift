@@ -41,7 +41,8 @@ struct PanelView: View {
             }
             ServiceSection(service: model.tab, snap: model.snapshot(model.tab), now: model.now(),
                            onReauthorize: model.onReauthorizeKeychain)
-            if model.tab == .codex, model.codex.status != .notLoggedIn, model.codex.status != .apiKeyOnly {
+            if model.tab == .codex, model.codex.status != .notLoggedIn, model.codex.status != .apiKeyOnly,
+               !CommandLine.arguments.contains("--debug-no-chart") {
                 Divider()
                 TokenChartSection(model: model)
             }
@@ -205,6 +206,6 @@ struct TooltipView: View {
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .windowBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.4)))
-        .shadow(radius: 3)
+        .shadow(radius: CommandLine.arguments.contains("--debug-no-shadow") ? 0 : 3)
     }
 }

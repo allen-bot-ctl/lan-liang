@@ -317,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let prefix = argValue("debug-render-prefix") ?? "panel"
         var count = 0
         for ap in ["dark", "light"] {
-            for tab in Service.allCases {
+            for tab in Service.allCases where argValue("debug-only-tab").map({ $0 == tab.rawValue }) ?? true {
                 for range in (tab == .codex ? TokenRange.allCases : [.daily]) {
                     model.tab = tab
                     model.range = range
