@@ -1,5 +1,4 @@
 import SwiftUI
-import Charts
 
 /// 面板与菜单栏共用的数据。
 final class PanelModel: ObservableObject {
@@ -137,42 +136,7 @@ struct TokenChartSection: View {
                 }
                 .pickerStyle(.segmented).labelsHidden().frame(width: 150)
             }
-            Chart(bars) { b in
-                BarMark(x: .value("期间", b.key), y: .value("Tokens", Double(b.value)))
-                    .foregroundStyle(b.key == active ? Color.orange : Color.orange.opacity(0.7))
-            }
-            .chartXAxis {
-                AxisMarks(values: axisKeys(bars)) { v in
-                    AxisValueLabel { if let k = v.as(String.self) { Text(axisLabel(k)) } }
-                }
-            }
-            .chartYAxis {
-                AxisMarks(position: .leading) { v in
-                    AxisGridLine()
-                    AxisValueLabel { if let n = v.as(Double.self) { Text(Fmt.tokens(Int64(n))) } }
-                }
-            }
-            .chartOverlay { proxy in
-                GeometryReader { geo in
-                    Rectangle().fill(Color.clear).contentShape(Rectangle())
-                        .onContinuousHover { phase in
-                            switch phase {
-                            case .active(let p):
-                                let x = p.x - geo[proxy.plotAreaFrame].origin.x
-                                hover = proxy.value(atX: x, as: String.self)
-                            case .ended:
-                                hover = nil
-                            }
-                        }
-                    if let k = active, let b = bars.first(where: { $0.key == k }),
-                       let x = proxy.position(forX: k) {
-                        let plot = geo[proxy.plotAreaFrame]
-                        TooltipView(bar: b)
-                            .fixedSize()
-                            .position(x: min(max(plot.origin.x + x, 90), geo.size.width - 90), y: 36)
-                    }
-                }
-            }
+            BarChart(bars: bars, active: active, axisKeys: Set(axisKeys(bars)), axisLabel: axisLabel, hover: $hover)
             .frame(height: 150)
         }
     }
@@ -206,6 +170,66 @@ struct TooltipView: View {
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .windowBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.4)))
-        .shadow(radius: CommandLine.arguments.contains("--debug-no-shadow") ? 0 : 3)
+
+    }
+}
+
+/// 自绘柱状图（不用 Swift Charts：它在没有 GPU 的 Intel CI 机器上会触发 Metal 断言）。
+struct BarChart: View {
+    let bars: [TokenBar]
+    let active: String?
+    let axisKeys: Set<String>
+    let axisLabel: (String) -> String
+    @Binding var hover: String?
+
+    private let axisWidth: CGFloat = 44
+    private let labelHeight: CGFloat = 16
+
+    var body: some View {
+        let maxV = max(bars.map { $0.value }.max() ?? 0, 1)
+        GeometryReader { geo in
+            let plotW = geo.size.width - axisWidth
+            let plotH = geo.size.height - labelHeight
+            let slot = plotW / CGFloat(max(bars.count, 1))
+            ZStack(alignment: .topLeading) {
+                ForEach([0.0, 0.5, 1.0], id: \.self) { f in
+                    let y = plotH * (1 - f)
+                    Path { p in p.move(to: CGPoint(x: axisWidth, y: y)); p.addLine(to: CGPoint(x: geo.size.width, y: y)) }
+                        .stroke(Color.secondary.opacity(0.2), lineWidth: 0.5)
+                    Text(Fmt.tokens(Int64(Double(maxV) * f)))
+                        .font(.system(size: 9)).foregroundColor(.secondary)
+                        .frame(width: axisWidth - 4, alignment: .trailing)
+                        .position(x: (axisWidth - 4) / 2, y: min(max(y, 6), plotH - 6))
+                }
+                ForEach(Array(bars.enumerated()), id: \.element.key) { i, b in
+                    let h = plotH * CGFloat(Double(b.value) / Double(maxV))
+                    Rectangle()
+                        .fill(b.key == active ? Color.orange : Color.orange.opacity(0.7))
+                        .frame(width: max(slot * 0.62, 1), height: max(h, b.value > 0 ? 1 : 0))
+                        .position(x: axisWidth + slot * (CGFloat(i) + 0.5), y: plotH - h / 2)
+                    if axisKeys.contains(b.key) {
+                        Text(axisLabel(b.key)).font(.system(size: 9)).foregroundColor(.secondary)
+                            .fixedSize()
+                            .position(x: axisWidth + slot * (CGFloat(i) + 0.5), y: plotH + labelHeight / 2 + 1)
+                    }
+                }
+                Color.clear.contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let p):
+                            let i = Int((p.x - axisWidth) / slot)
+                            hover = (p.x >= axisWidth && i >= 0 && i < bars.count) ? bars[i].key : nil
+                        case .ended:
+                            hover = nil
+                        }
+                    }
+                if let k = active, let i = bars.firstIndex(where: { $0.key == k }) {
+                    TooltipView(bar: bars[i])
+                        .fixedSize()
+                        .position(x: min(max(axisWidth + slot * (CGFloat(i) + 0.5), 90), geo.size.width - 90), y: 36)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
     }
 }
