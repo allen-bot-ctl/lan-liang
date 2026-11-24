@@ -79,7 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if args.contains("--debug-open-panel") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                let it = [self.items[self.model.tab], self.items[.codex], self.items[.gemini]]
+                let it: NSStatusItem? = [self.items[self.model.tab], self.items[.codex], self.items[.gemini]]
                     .compactMap { $0 }.first { $0.isVisible } ?? self.fallbackItem
                 self.showPanel(from: it?.button)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.printRects() }
