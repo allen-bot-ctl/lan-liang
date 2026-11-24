@@ -48,31 +48,29 @@ shoot() {  # $1=后缀  其余=启动参数
 
 # 每个模拟状态启动一次应用，打开面板后真实截屏（菜单栏 + 面板），深浅两套；悬停取最高的柱子。
 # 用法：shots/<名字>-<深浅>.png；名字 = 模拟数据-页签[-区间]
-run() {  # $1=fixture  $2=tab  $3=range(可空)
-  local fx="$1" tab="$2" range="${3:-}" name="$1-$2${3:+-$3}"
-  for ap in dark light; do
+# 菜单栏跟随系统外观，所以要真的切换系统深浅色再截（应用内也同步 --debug-appearance）。
+set_dark() {  # $1=true|false
+  perl -e "alarm 30; exec @ARGV" osascript -e "tell application \"System Events\" to tell appearance preferences to set dark mode to $1" \
+    || echo "::warning::切换系统深浅色失败"
+  sleep 2
+  echo "RELEASE: system_appearance=$(defaults read -g AppleInterfaceStyle 2>/dev/null || echo Light) (want dark=$1)"
+}
+CASES=(
+  "normal codex daily" "normal codex weekly" "normal codex monthly" "normal gemini"
+  "codex-5h codex daily" "low codex daily" "low gemini"
+  "sub-lt1day codex daily" "sub-expired codex daily" "official-failed codex daily"
+  "failed codex daily" "failed gemini" "expired codex daily" "expired gemini" "keychain-denied gemini"
+  "both-weekly codex daily" "codex-only codex daily" "none codex daily"
+)
+for ap in dark light; do
+  if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
+  for c in "${CASES[@]}"; do
+    read -r fx tab range <<<"$c"
+    name="$fx-$tab${range:+-$range}"
     LANLIANG_FAKE="$PWD/fixtures/$fx.json" shoot "-$name-$ap" --debug-open-panel --debug-appearance=$ap \
       --debug-tab=$tab ${range:+--debug-range=$range} --debug-hover=auto
   done
-}
-run normal codex daily
-run normal codex weekly
-run normal codex monthly
-run normal gemini
-run codex-5h codex daily
-run low codex daily
-run low gemini
-run sub-lt1day codex daily
-run sub-expired codex daily
-run official-failed codex daily
-run failed codex daily
-run failed gemini
-run expired codex daily
-run expired gemini
-run keychain-denied gemini
-run both-weekly codex daily
-run codex-only codex daily
-run none codex daily
+done
 chk() { grep -h "^DEBUG_MENUBAR" "/tmp/shots--$1-dark.log" | grep -q "groups=$2\$" || { echo "::error::$1 菜单栏组不对"; exit 1; }; }
 chk normal-codex-daily 'codex:77%,gemini:44%+64%'
 chk both-weekly-codex-daily 'codex:77%,gemini:44%'
@@ -82,5 +80,6 @@ chk codex-5h-codex-daily 'codex:77%+36%,gemini:44%+64%'
 chk expired-codex-daily 'codex:--,gemini:--'
 chk keychain-denied-gemini 'codex:77%'
 chk low-codex-daily 'codex:8%+25%,gemini:25%+64%'
+chk failed-gemini 'codex:77%,gemini:--'
 grep -h "^DEBUG_" /tmp/shots-*.log | sed 's/^/RELEASE: /'
 ls -l shots

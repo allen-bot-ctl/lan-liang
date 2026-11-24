@@ -102,27 +102,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return img
     }
 
-    private func icon(for s: Service) -> NSImage? {
-        s == .codex ? symbol("terminal", label: "Codex") : symbol("sparkle", label: "Gemini")
+    private let primaryFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+    private let secondaryFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+    private let iconSize: CGFloat = 16, iconGap: CGFloat = 3, numberGap: CGFloat = 3
+
+    private func textWidth(_ s: String, _ f: NSFont) -> CGFloat { ceil((s as NSString).size(withAttributes: [.font: f]).width) }
+
+    /// 定宽：有 5 小时窗口的组按「100% 100%」，只有周的组按「100%」（契约 §4）。
+    private func reservedWidth(hasSecondary: Bool) -> CGFloat {
+        var w = iconSize + iconGap + textWidth("100%", primaryFont)
+        if hasSecondary { w += numberGap + textWidth("100%", secondaryFont) }
+        return w
     }
 
-    private func title(primary: String, secondary: String?) -> NSAttributedString {
-        let t = NSMutableAttributedString(string: " " + primary, attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
-            .foregroundColor: NSColor.labelColor])
-        if let s = secondary {
-            t.append(NSAttributedString(string: " " + s, attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
-                .foregroundColor: NSColor.secondaryLabelColor,
-                .kern: 0.5]))
+    /// 一组画成一张图：图标 + 周% （+ 5 小时%）左对齐，颜色在绘制时按当前菜单栏外观取。
+    private func groupImage(service: Service, primary: String, secondary: String?) -> NSImage {
+        let width = reservedWidth(hasSecondary: secondary != nil)
+        let height: CGFloat = 18
+        let symbolName = service == .codex ? "terminal" : "sparkle"
+        let primaryFont = self.primaryFont, secondaryFont = self.secondaryFont
+        let iconSize = self.iconSize, iconGap = self.iconGap, numberGap = self.numberGap
+        let img = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
+            let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.labelColor]))
+            if let sym = NSImage(systemSymbolName: symbolName, accessibilityDescription: service.title)?.withSymbolConfiguration(cfg) {
+                let s = sym.size
+                let scale = min(iconSize / max(s.width, 1), iconSize / max(s.height, 1), 1)
+                let w = s.width * scale, h = s.height * scale
+                sym.draw(in: NSRect(x: (iconSize - w) / 2, y: (height - h) / 2, width: w, height: h))
+            }
+            var x = iconSize + iconGap
+            let p = NSAttributedString(string: primary, attributes: [.font: primaryFont, .foregroundColor: NSColor.labelColor])
+            let ps = p.size()
+            p.draw(at: NSPoint(x: x, y: (height - ps.height) / 2))
+            x += ps.width + numberGap
+            if let sec = secondary {
+                let t = NSAttributedString(string: sec, attributes: [.font: secondaryFont, .foregroundColor: NSColor.secondaryLabelColor])
+                let ts = t.size()
+                t.draw(at: NSPoint(x: x, y: (height - ts.height) / 2 - 0.5))
+            }
+            return true
         }
-        return t
-    }
-
-    /// 按最长「100% 100%」锁定宽度，数字变化不跳动。
-    private func lockedWidth(hasSecondary: Bool) -> CGFloat {
-        let w = title(primary: "100%", secondary: hasSecondary ? "100%" : nil).size().width
-        return ceil(w + 16 + 3 + 8)
+        img.isTemplate = false
+        return img
     }
 
     private func updateMenuBar() {
@@ -131,9 +153,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let it = items[s] else { continue }
             if let g = MenuBarText.group(for: s, snapshot: model.snapshot(s)) {
                 it.isVisible = true
-                it.button?.image = icon(for: s)
-                it.button?.attributedTitle = title(primary: g.primary, secondary: g.secondary)
-                it.length = lockedWidth(hasSecondary: g.secondary != nil)
+                it.button?.title = ""
+                it.button?.image = groupImage(service: s, primary: g.primary, secondary: g.secondary)
+                it.length = reservedWidth(hasSecondary: g.secondary != nil) + 8
                 anyShown = true
             } else {
                 it.isVisible = false

@@ -100,9 +100,8 @@ struct QuotaRow: View {
 
     var color: Color {
         switch QuotaLevel.of(remainingPercent: window.remainingPercent) {
-        case .normal: return .green
-        case .low: return .orange
-        case .critical: return .red
+        case .normal: return Color(nsColor: .systemGreen)
+        case .critical: return Color(nsColor: .systemRed)
         }
     }
 
