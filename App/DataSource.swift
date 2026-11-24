@@ -185,7 +185,14 @@ final class GeminiLive {
     private var refreshed: (refreshToken: String, access: String, expiry: Date)?
     private let lock = NSLock()
 
-    func allowKeychainAgain() { lock.lock(); keychainDenied = false; lock.unlock() }
+    func allowKeychainAgain() { locked { keychainDenied = false } }
+
+    /// 同步加锁小工具：async 函数里不能直接调 NSLock.lock()，经由同步函数调用即可。
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
 
     private enum CredResult { case found(GeminiCredential), none, denied, busy }
 
@@ -237,7 +244,7 @@ final class GeminiLive {
     private func accessToken(_ c: GeminiCredential) async throws -> String {
         if !c.isExpired(now: Date()) { return c.accessToken }
         guard let rt = c.refreshToken, !rt.isEmpty else { throw HTTPFailure.unauthorized }
-        lock.lock(); let cached = refreshed; lock.unlock()
+        let cached = locked { refreshed }
         if let r = cached, r.refreshToken == rt, r.expiry.timeIntervalSinceNow > 60 { return r.access }
         guard !AntigravityOAuth.clientSecret.isEmpty else { throw HTTPFailure.unauthorized }
         var req = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
@@ -253,7 +260,7 @@ final class GeminiLive {
         guard let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
               let at = obj["access_token"] as? String else { throw HTTPFailure.unauthorized }
         let exp = Date().addingTimeInterval((obj["expires_in"] as? Double) ?? 3_600)
-        lock.lock(); refreshed = (rt, at, exp); lock.unlock()
+        locked { refreshed = (rt, at, exp) }
         return at
     }
 

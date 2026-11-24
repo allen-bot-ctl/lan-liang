@@ -51,12 +51,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.onRefresh = { [weak self] in self?.refresh() }
         model.onReauthorizeKeychain = { [weak self] in self?.source.allowKeychainAgain(); self?.refresh() }
 
-        if let dir = argValue("debug-render") {
-            source.loadSync(into: model)
-            renderPanels(to: dir)
-            exit(0)
-        }
-
         // 先建的状态项在右边：栏量兜底图标 → Gemini → Codex（Codex 在最左）。
         fallbackItem = makeItem(tag: -1)
         fallbackItem.button?.image = symbol("chart.bar.fill", label: "栏量")
@@ -282,53 +276,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let groups = Service.allCases.compactMap { s in MenuBarText.group(for: s, snapshot: model.snapshot(s)) }
             .map { "\($0.service.rawValue):\($0.primary)\($0.secondary.map { "+" + $0 } ?? "")" }
         print("DEBUG_MENUBAR groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ","))")
-        fflush(stdout)
-    }
-
-    /// 把面板放进屏幕外窗口，用 cacheDisplay 渲染成 2x PNG（AppKit 控件也能画出来）。
-    private func snapshotPanel(appearance ap: String, to url: URL) -> Bool {
-        let view = NSHostingView(rootView: PanelView(model: model))
-        let win = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 360, height: 400),
-                           styleMask: [.borderless], backing: .buffered, defer: false)
-        win.appearance = NSAppearance(named: ap == "dark" ? .darkAqua : .aqua)
-        win.backgroundColor = .windowBackgroundColor
-        win.contentView = view
-        view.layoutSubtreeIfNeeded()
-        let size = view.fittingSize
-        win.setContentSize(size)
-        view.frame = NSRect(origin: .zero, size: size)
-        win.orderFrontRegardless()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
-        view.layoutSubtreeIfNeeded()
-        view.display()
-        let scale: CGFloat = 2
-        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
-                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return false }
-        rep.size = size
-        view.cacheDisplay(in: view.bounds, to: rep)
-        win.orderOut(nil)
-        guard let png = rep.representation(using: .png, properties: [:]) else { return false }
-        return (try? png.write(to: url)) != nil
-    }
-
-    /// 离屏渲染面板（页签 × 每日/每周/每月，深浅各一张 2x），写到目录后退出。
-    private func renderPanels(to path: String) {
-        let dir = URL(fileURLWithPath: path)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let prefix = argValue("debug-render-prefix") ?? "panel"
-        var count = 0
-        for ap in ["dark", "light"] {
-            for tab in Service.allCases where argValue("debug-only-tab").map({ $0 == tab.rawValue }) ?? true {
-                for range in (tab == .codex ? TokenRange.allCases : [.daily]) {
-                    model.tab = tab
-                    model.range = range
-                    let name = tab == .codex ? "\(prefix)-codex-\(range.rawValue)-\(ap).png" : "\(prefix)-gemini-\(ap).png"
-                    if snapshotPanel(appearance: ap, to: dir.appendingPathComponent(name)) { count += 1 }
-                }
-            }
-        }
-        print("DEBUG_RENDER count=\(count)")
         fflush(stdout)
     }
 }

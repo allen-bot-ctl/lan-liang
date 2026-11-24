@@ -40,8 +40,7 @@ struct PanelView: View {
             }
             ServiceSection(service: model.tab, snap: model.snapshot(model.tab), now: model.now(),
                            onReauthorize: model.onReauthorizeKeychain)
-            if model.tab == .codex, model.codex.status != .notLoggedIn, model.codex.status != .apiKeyOnly,
-               !CommandLine.arguments.contains("--debug-no-chart") {
+            if model.tab == .codex, model.codex.status != .notLoggedIn, model.codex.status != .apiKeyOnly {
                 Divider()
                 TokenChartSection(model: model)
             }

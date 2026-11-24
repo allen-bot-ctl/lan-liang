@@ -100,19 +100,6 @@ jobs:
             echo "RELEASE: smoke=$a alive 8s"
           done
 
-      - name: Render diagnostics (which view needs GPU)
-        continue-on-error: true
-        shell: bash
-        run: |
-          bin="build/${NAME}.app/Contents/MacOS/$NAME"
-          export LANLIANG_FAKE="$PWD/fixtures/normal.json"
-          try() { "$bin" --debug-render="$RUNNER_TEMP/diag" "$@" >/tmp/diag.log 2>&1; echo "RELEASE: diag [$*] exit=$? $(grep -o 'DEBUG_RENDER.*' /tmp/diag.log)"; }
-          try --debug-only-tab=gemini
-          try --debug-only-tab=codex --debug-no-chart
-          try --debug-only-tab=codex
-          try --debug-only-tab=codex --debug-hover=auto --debug-no-shadow
-          try --debug-only-tab=codex --debug-hover=auto
-
       - name: Screenshots
         run: scripts/ci_screenshots.sh
 

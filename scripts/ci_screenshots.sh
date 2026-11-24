@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 带隐藏参数启动应用打开面板，应用打印截图区域（左上原点、点）；screencapture -R 裁剪并检查不是全黑。
-# 另用 --debug-render 离屏渲染每个页签深浅两套 2x 图。
+# 每个模拟状态单独启动一次，截真实窗口。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source ./project.env
@@ -29,7 +29,7 @@ shoot() {  # $1=后缀  其余=启动参数
   local log="/tmp/shots-$tag.log"
   "$bin" "$@" >"$log" 2>&1 &
   local pid=$!
-  sleep 6
+  sleep 5
   cat "$log"
   local mb it pn
   mb=$(awk '/^DEBUG_RECT_MENUBAR/{print $2}' "$log")
@@ -46,23 +46,38 @@ shoot() {  # $1=后缀  其余=启动参数
   done
 }
 
-export LANLIANG_FAKE
-# 1) 离屏渲染面板：每个模拟状态 × 页签/区间 × 深浅，悬停取最高的柱子
-for fx in normal codex-5h sub-lt1day sub-expired official-failed failed expired keychain-denied none; do
-  LANLIANG_FAKE="$PWD/fixtures/$fx.json" "$bin" --debug-render="$PWD/shots/render" --debug-render-prefix="$fx" --debug-hover=auto \
-    | tee "/tmp/shots-render-$fx.log"
-  grep -q "^DEBUG_RENDER count=8" "/tmp/shots-render-$fx.log" || { echo "::error::$fx 离屏渲染不满 8 张"; exit 1; }
-done
-for f in shots/render/*.png; do nonblack "$f" || { echo "::error::$f 没有内容"; exit 1; }; done
-# 2) 真实菜单栏 + 面板截图：菜单栏四种状态，深浅两套
-for fx in normal both-weekly codex-only none; do
+# 每个模拟状态启动一次应用，打开面板后真实截屏（菜单栏 + 面板），深浅两套；悬停取最高的柱子。
+# 用法：shots/<名字>-<深浅>.png；名字 = 模拟数据-页签[-区间]
+run() {  # $1=fixture  $2=tab  $3=range(可空)
+  local fx="$1" tab="$2" range="${3:-}" name="$1-$2${3:+-$3}"
   for ap in dark light; do
-    LANLIANG_FAKE="$PWD/fixtures/$fx.json" shoot "-$fx-$ap" --debug-open-panel --debug-appearance=$ap --debug-hover=auto
+    LANLIANG_FAKE="$PWD/fixtures/$fx.json" shoot "-$name-$ap" --debug-open-panel --debug-appearance=$ap \
+      --debug-tab=$tab ${range:+--debug-range=$range} --debug-hover=auto
   done
-done
-grep -h "^DEBUG_MENUBAR" /tmp/shots--normal-dark.log | grep -q "groups=codex:77%,gemini:44%+64%" || { echo "::error::normal 菜单栏组不对"; exit 1; }
-grep -h "^DEBUG_MENUBAR" /tmp/shots--both-weekly-dark.log | grep -q "groups=codex:77%,gemini:44%$" || { echo "::error::both-weekly 菜单栏组不对"; exit 1; }
-grep -h "^DEBUG_MENUBAR" /tmp/shots--codex-only-dark.log | grep -q "groups=codex:77%$" || { echo "::error::codex-only 菜单栏组不对"; exit 1; }
-grep -h "^DEBUG_MENUBAR" /tmp/shots--none-dark.log | grep -q "groups=fallback" || { echo "::error::none 菜单栏组不对"; exit 1; }
+}
+run normal codex daily
+run normal codex weekly
+run normal codex monthly
+run normal gemini
+run codex-5h codex daily
+run sub-lt1day codex daily
+run sub-expired codex daily
+run official-failed codex daily
+run failed codex daily
+run failed gemini
+run expired codex daily
+run expired gemini
+run keychain-denied gemini
+run both-weekly codex daily
+run codex-only codex daily
+run none codex daily
+chk() { grep -h "^DEBUG_MENUBAR" "/tmp/shots--$1-dark.log" | grep -q "groups=$2\$" || { echo "::error::$1 菜单栏组不对"; exit 1; }; }
+chk normal-codex-daily 'codex:77%,gemini:44%+64%'
+chk both-weekly-codex-daily 'codex:77%,gemini:44%'
+chk codex-only-codex-daily 'codex:77%'
+chk none-codex-daily 'fallback'
+chk codex-5h-codex-daily 'codex:77%+36%,gemini:44%+64%'
+chk expired-codex-daily 'codex:--,gemini:--'
+chk keychain-denied-gemini 'codex:77%'
 grep -h "^DEBUG_" /tmp/shots-*.log | sed 's/^/RELEASE: /'
-ls -lR shots
+ls -l shots
