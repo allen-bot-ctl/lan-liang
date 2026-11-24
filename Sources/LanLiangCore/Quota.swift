@@ -26,19 +26,48 @@ public struct QuotaWindow: Codable, Equatable {
     }
 }
 
-/// 服务在菜单栏与面板上的状态（对应契约 §3 状态表）。
-public enum ServiceState: Equatable {
-    case notLoggedIn
-    case apiKeyOnly
-    case loading
-    case ok(weekly: QuotaWindow?, fiveHour: QuotaWindow?)
-    case fetchFailed
-    case loginExpired
-    case keychainDenied
-}
-
 public enum Service: String, CaseIterable, Codable {
     case codex, gemini
+
+    public var title: String { self == .codex ? "Codex" : "Gemini" }
+}
+
+/// 服务状态（契约 §4 状态表）。
+public enum ServiceStatus: String, Codable, Equatable {
+    case ok, loading, fetchFailed, loginExpired, apiKeyOnly, notLoggedIn, keychainDenied
+}
+
+/// 一个服务当前的全部数据；额度保留上次成功值。
+public struct ServiceSnapshot: Codable, Equatable {
+    public var status: ServiceStatus
+    public var email: String?
+    public var plan: String?
+    public var subscriptionUntil: Date?
+    public var weekly: QuotaWindow?
+    public var fiveHour: QuotaWindow?
+
+    public init(status: ServiceStatus, email: String? = nil, plan: String? = nil, subscriptionUntil: Date? = nil,
+                weekly: QuotaWindow? = nil, fiveHour: QuotaWindow? = nil) {
+        self.status = status; self.email = email; self.plan = plan
+        self.subscriptionUntil = subscriptionUntil; self.weekly = weekly; self.fiveHour = fiveHour
+    }
+
+    public var hasQuota: Bool { weekly != nil || fiveHour != nil }
+
+    /// 面板额度区的提示文字（红字或灰字）；nil 表示不显示提示。
+    public func message(for service: Service) -> String? {
+        switch status {
+        case .ok: return nil
+        case .loading: return hasQuota ? nil : "正在读取…"
+        case .fetchFailed: return "额度获取失败，5 分钟后自动重试"
+        case .loginExpired:
+            return service == .codex ? "Codex 登录已过期，在终端运行一次 codex 重新登录"
+                                     : "Gemini 登录已过期，打开一次 Antigravity 后再刷新"
+        case .apiKeyOnly: return "API Key 账号没有订阅额度"
+        case .notLoggedIn: return "未检测到登录"
+        case .keychainDenied: return "没有钥匙串权限，读不到 Gemini 登录"
+        }
+    }
 }
 
 /// 菜单栏一组的文字：nil 表示整组不显示。
@@ -51,19 +80,21 @@ public struct MenuBarGroup: Equatable {
 public enum MenuBarText {
     public static func percent(_ v: Double) -> String { "\(Int(v.rounded()))%" }
 
-    public static func group(for service: Service, state: ServiceState) -> MenuBarGroup? {
-        switch state {
-        case .notLoggedIn, .apiKeyOnly:
+    public static func group(for service: Service, snapshot s: ServiceSnapshot) -> MenuBarGroup? {
+        switch s.status {
+        case .notLoggedIn, .apiKeyOnly, .keychainDenied:
             return nil
-        case .loading, .fetchFailed, .loginExpired, .keychainDenied:
+        case .loginExpired:
             return MenuBarGroup(service: service, primary: "--", secondary: nil)
-        case let .ok(weekly, fiveHour):
-            guard let w = weekly else {
-                if let f = fiveHour { return MenuBarGroup(service: service, primary: percent(f.remainingPercent), secondary: nil) }
-                return MenuBarGroup(service: service, primary: "--", secondary: nil)
+        case .ok, .loading, .fetchFailed:
+            guard s.hasQuota else {
+                return MenuBarGroup(service: service, primary: s.status == .loading ? "…" : "--", secondary: nil)
             }
-            return MenuBarGroup(service: service, primary: percent(w.remainingPercent),
-                                secondary: fiveHour.map { percent($0.remainingPercent) })
+            if let w = s.weekly {
+                return MenuBarGroup(service: service, primary: percent(w.remainingPercent),
+                                    secondary: s.fiveHour.map { percent($0.remainingPercent) })
+            }
+            return MenuBarGroup(service: service, primary: percent(s.fiveHour!.remainingPercent), secondary: nil)
         }
     }
 }

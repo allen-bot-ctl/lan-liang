@@ -75,9 +75,20 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$APP/Contents/Info.plist"
 
-# ad-hoc 签名，不开 hardened runtime
-codesign --force --deep -s - "$APP"
+# 签名：有 SIGN_IDENTITY（如 "LanLiang Self-Signed"）就用稳定自签名证书，否则 ad-hoc。
+# 由内向外签：Sparkle 的 XPC 服务、Autoupdate、Updater.app → Sparkle.framework → 应用本体。不开 hardened runtime。
+IDENTITY="${SIGN_IDENTITY:--}"
+KC_ARGS=()
+[ -n "${SIGN_KEYCHAIN:-}" ] && KC_ARGS=(--keychain "$SIGN_KEYCHAIN")
+sign() { codesign --force --sign "$IDENTITY" --timestamp=none "${KC_ARGS[@]+"${KC_ARGS[@]}"}" "$@"; }
+FW="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+for x in "$FW"/XPCServices/*.xpc; do [ -e "$x" ] && sign "$x"; done
+[ -e "$FW/Autoupdate" ] && sign "$FW/Autoupdate"
+[ -e "$FW/Updater.app" ] && sign "$FW/Updater.app"
+sign "$APP/Contents/Frameworks/Sparkle.framework"
+sign "$APP"
 codesign --verify --deep --strict "$APP"
+echo "签名身份: $IDENTITY"
 
 STAGE="build/dmg"
 mkdir -p "$STAGE"

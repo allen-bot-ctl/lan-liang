@@ -11,13 +11,23 @@ final class LanLiangCoreTests: XCTestCase {
     func testMenuBarGroups() {
         let w = QuotaWindow(kind: .weekly, remainingPercent: 77.4, resetsAt: nil)
         let f = QuotaWindow(kind: .fiveHour, remainingPercent: 64, resetsAt: nil)
-        XCTAssertEqual(MenuBarText.group(for: .codex, state: .ok(weekly: w, fiveHour: nil)),
+        XCTAssertEqual(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .ok, weekly: w)),
                        MenuBarGroup(service: .codex, primary: "77%", secondary: nil))
-        XCTAssertEqual(MenuBarText.group(for: .gemini, state: .ok(weekly: w, fiveHour: f))?.secondary, "64%")
-        XCTAssertNil(MenuBarText.group(for: .codex, state: .notLoggedIn))
-        XCTAssertNil(MenuBarText.group(for: .codex, state: .apiKeyOnly))
-        XCTAssertEqual(MenuBarText.group(for: .codex, state: .fetchFailed)?.primary, "--")
-        XCTAssertEqual(MenuBarText.group(for: .gemini, state: .loginExpired)?.primary, "--")
+        XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: ServiceSnapshot(status: .ok, weekly: w, fiveHour: f))?.secondary, "64%")
+        XCTAssertNil(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .notLoggedIn)))
+        XCTAssertNil(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .apiKeyOnly)))
+        XCTAssertNil(MenuBarText.group(for: .gemini, snapshot: ServiceSnapshot(status: .keychainDenied)))
+        // 失败时保留上次成功值；从没成功过显示 --
+        XCTAssertEqual(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .fetchFailed, weekly: w))?.primary, "77%")
+        XCTAssertEqual(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .fetchFailed))?.primary, "--")
+        XCTAssertEqual(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .loading))?.primary, "…")
+        XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: ServiceSnapshot(status: .loginExpired, weekly: w))?.primary, "--")
+    }
+
+    func testMessages() {
+        XCTAssertEqual(ServiceSnapshot(status: .loginExpired).message(for: .codex), "Codex 登录已过期，在终端运行一次 codex 重新登录")
+        XCTAssertEqual(ServiceSnapshot(status: .notLoggedIn).message(for: .gemini), "未检测到登录")
+        XCTAssertNil(ServiceSnapshot(status: .ok).message(for: .codex))
     }
 
     func testRemainingClamped() {
@@ -173,5 +183,16 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(m.last?.label, "2026年11月")
         XCTAssertEqual(m.last?.value, 16)
         XCTAssertFalse(m.last!.usesOfficial)
+    }
+}
+
+final class FakeDataTests: XCTestCase {
+    func testDecode() throws {
+        let json = #"{"now":"2026-11-24T19:00:00Z","codex":{"status":"ok","email":"allen@example.com","plan":"Pro 200","subscriptionUntil":"2026-12-12T08:00:00Z","weekly":{"kind":"weekly","remainingPercent":77,"resetsAt":1797000000}},"gemini":{"status":"notLoggedIn"},"official":{"2026-11-23":304000000},"local":{}}"#
+        let f = try FakeData.decode(Data(json.utf8))
+        XCTAssertEqual(f.codex.weekly?.remainingPercent, 77)
+        XCTAssertEqual(f.gemini.status, .notLoggedIn)
+        XCTAssertEqual(f.official?["2026-11-23"], 304_000_000)
+        XCTAssertEqual(f.codex.subscriptionUntil, Date(timeIntervalSince1970: 1_797_062_400))
     }
 }

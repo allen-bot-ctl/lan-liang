@@ -46,11 +46,23 @@ shoot() {  # $1=后缀  其余=启动参数
   done
 }
 
-"$bin" --debug-render="$PWD/shots/render" | tee /tmp/shots-render.log
-n=$(ls shots/render/*.png | wc -l | tr -d ' ')
-[ "$n" -ge 4 ] || { echo "::error::离屏渲染只有 $n 张"; exit 1; }
+export LANLIANG_FAKE
+# 1) 离屏渲染面板：每个模拟状态 × 页签/区间 × 深浅，悬停取最高的柱子
+for fx in normal codex-5h sub-lt1day sub-expired official-failed failed expired keychain-denied none; do
+  LANLIANG_FAKE="$PWD/fixtures/$fx.json" "$bin" --debug-render="$PWD/shots/render" --debug-render-prefix="$fx" --debug-hover=auto \
+    | tee "/tmp/shots-render-$fx.log"
+  grep -q "^DEBUG_RENDER count=8" "/tmp/shots-render-$fx.log" || { echo "::error::$fx 离屏渲染不满 8 张"; exit 1; }
+done
 for f in shots/render/*.png; do nonblack "$f" || { echo "::error::$f 没有内容"; exit 1; }; done
-shoot "" --debug-open-panel
-shoot "-light" --debug-open-panel --debug-appearance=light
+# 2) 真实菜单栏 + 面板截图：菜单栏四种状态，深浅两套
+for fx in normal both-weekly codex-only none; do
+  for ap in dark light; do
+    LANLIANG_FAKE="$PWD/fixtures/$fx.json" shoot "-$fx-$ap" --debug-open-panel --debug-appearance=$ap --debug-hover=auto
+  done
+done
+grep -h "^DEBUG_MENUBAR" /tmp/shots--normal-dark.log | grep -q "groups=codex:77%,gemini:44%+64%" || { echo "::error::normal 菜单栏组不对"; exit 1; }
+grep -h "^DEBUG_MENUBAR" /tmp/shots--both-weekly-dark.log | grep -q "groups=codex:77%,gemini:44%$" || { echo "::error::both-weekly 菜单栏组不对"; exit 1; }
+grep -h "^DEBUG_MENUBAR" /tmp/shots--codex-only-dark.log | grep -q "groups=codex:77%$" || { echo "::error::codex-only 菜单栏组不对"; exit 1; }
+grep -h "^DEBUG_MENUBAR" /tmp/shots--none-dark.log | grep -q "groups=fallback" || { echo "::error::none 菜单栏组不对"; exit 1; }
 grep -h "^DEBUG_" /tmp/shots-*.log | sed 's/^/RELEASE: /'
 ls -lR shots
