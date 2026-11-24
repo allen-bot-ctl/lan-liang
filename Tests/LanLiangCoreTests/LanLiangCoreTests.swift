@@ -30,6 +30,15 @@ final class LanLiangCoreTests: XCTestCase {
         XCTAssertNil(ServiceSnapshot(status: .ok).message(for: .codex))
     }
 
+    func testQuotaLevel() {
+        XCTAssertEqual(QuotaLevel.of(remainingPercent: 100), .normal)
+        XCTAssertEqual(QuotaLevel.of(remainingPercent: 30), .normal)
+        XCTAssertEqual(QuotaLevel.of(remainingPercent: 29), .low)
+        XCTAssertEqual(QuotaLevel.of(remainingPercent: 10), .low)
+        XCTAssertEqual(QuotaLevel.of(remainingPercent: 9), .critical)
+        XCTAssertEqual(QuotaLevel.of(remainingPercent: 0), .critical)
+    }
+
     func testRemainingClamped() {
         XCTAssertEqual(QuotaWindow(kind: .weekly, remainingPercent: 130, resetsAt: nil).remainingPercent, 100)
         XCTAssertEqual(QuotaWindow(kind: .weekly, remainingPercent: -3, resetsAt: nil).remainingPercent, 0)

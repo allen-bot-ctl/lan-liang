@@ -13,6 +13,17 @@ public enum WindowKind: String, Codable, Equatable {
     }
 }
 
+/// 进度条颜色档：剩余 ≥30% 正常（绿），10%–30% 偏低（橙），<10% 告急（红）。
+public enum QuotaLevel: String, Equatable {
+    case normal, low, critical
+
+    public static func of(remainingPercent p: Double) -> QuotaLevel {
+        if p < 10 { return .critical }
+        if p < 30 { return .low }
+        return .normal
+    }
+}
+
 /// 一个额度窗口：剩余百分比（0…100）与重置时间。
 public struct QuotaWindow: Codable, Equatable {
     public var kind: WindowKind

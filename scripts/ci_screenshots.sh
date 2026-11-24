@@ -60,6 +60,8 @@ run normal codex weekly
 run normal codex monthly
 run normal gemini
 run codex-5h codex daily
+run low codex daily
+run low gemini
 run sub-lt1day codex daily
 run sub-expired codex daily
 run official-failed codex daily
@@ -79,5 +81,6 @@ chk none-codex-daily 'fallback'
 chk codex-5h-codex-daily 'codex:77%+36%,gemini:44%+64%'
 chk expired-codex-daily 'codex:--,gemini:--'
 chk keychain-denied-gemini 'codex:77%'
+chk low-codex-daily 'codex:8%+25%,gemini:25%+64%'
 grep -h "^DEBUG_" /tmp/shots-*.log | sed 's/^/RELEASE: /'
 ls -l shots

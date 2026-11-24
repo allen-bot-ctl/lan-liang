@@ -98,6 +98,14 @@ struct QuotaRow: View {
     let window: QuotaWindow
     let now: Date
 
+    var color: Color {
+        switch QuotaLevel.of(remainingPercent: window.remainingPercent) {
+        case .normal: return .green
+        case .low: return .orange
+        case .critical: return .red
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -107,8 +115,15 @@ struct QuotaRow: View {
                     Text("\(Fmt.countdown(from: now, to: r))后重置").font(.system(size: 11)).foregroundColor(.secondary)
                 }
             }
-            ProgressView(value: window.remainingPercent, total: 100)
-                .tint(window.remainingPercent < 20 ? .red : .green)
+            // 自绘进度条：macOS 的 ProgressView 不认 tint，会画成灰色
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.secondary.opacity(0.2))
+                    Capsule().fill(color)
+                        .frame(width: geo.size.width * CGFloat(window.remainingPercent / 100))
+                }
+            }
+            .frame(height: 6)
         }
     }
 }
