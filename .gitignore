@@ -1,0 +1,7 @@
+.build/
+build/
+dist/
+vendor/
+shots/
+Resources/AppIcon.icns
+.DS_Store
