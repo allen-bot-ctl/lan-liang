@@ -12,4 +12,4 @@ macOS 菜单栏小工具：显示 Codex 与 Gemini（Google Antigravity 登录�
 ## 开发
 - 纯逻辑：`Sources/LanLiangCore`，`swift test` 运行单测。
 - 界面：`App/`，`scripts/build.sh VERSION` 在 macOS 上打包。
-- CI：推送 main 触发 `.github/workflows/ci.yml`（单测、打包、冒烟、截图）。
+- CI：推送 master 触发 `.github/workflows/ci.yml`（单测、打包、冒烟、截图）。
