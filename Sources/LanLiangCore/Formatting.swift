@@ -13,9 +13,9 @@ public enum Fmt {
         guard let r = raw?.trimmingCharacters(in: .whitespaces).lowercased(), !r.isEmpty else { return "未知" }
         switch r {
         case "plus": return "Plus"
-        case "prolite": return "Pro 100"
+        case "prolite", "pro-lite": return "Pro 100"
         case "pro": return "Pro 200"
-        case "promax": return "Pro 500"
+        case "promax", "pro-max": return "Pro 500"
         case "free": return "Free"
         default: break
         }

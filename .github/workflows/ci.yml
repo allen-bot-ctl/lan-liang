@@ -5,11 +5,18 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "macOS runner（macos-latest 排队太久时换 macos-15-intel）"
+        required: false
+        default: macos-latest
+        type: choice
+        options: [macos-latest, macos-15-intel, macos-26-intel]
 
 jobs:
   build:
     name: Test, build and smoke (no publish)
-    runs-on: macos-latest
+    runs-on: ${{ inputs.runner || 'macos-latest' }}
     timeout-minutes: 30
     env:
       TAG: v0.0.0
@@ -78,10 +85,11 @@ jobs:
         run: |
           set -euo pipefail
           bin="build/${NAME}.app/Contents/MacOS/$NAME"
-          if ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+          if [ "$(uname -m)" = "arm64" ] && ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
             softwareupdate --install-rosetta --agree-to-license || true
           fi
-          for a in arm64 x86_64; do
+          archs="x86_64"; [ "$(uname -m)" = "arm64" ] && archs="arm64 x86_64"
+          for a in $archs; do
             arch -"$a" "$bin" >"/tmp/smoke-$a.log" 2>&1 &
             pid=$!
             sleep 8

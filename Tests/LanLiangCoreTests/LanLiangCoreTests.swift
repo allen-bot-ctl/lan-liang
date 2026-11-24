@@ -65,3 +65,113 @@ final class LanLiangCoreTests: XCTestCase {
         XCTAssertNil(JWT.payload("nope"))
     }
 }
+
+final class ParserTests: XCTestCase {
+    func data(_ s: String) -> Data { Data(s.utf8) }
+
+    func testCodexWindowsByLength() {
+        // 周放在 secondary、5 小时放在 primary 也要认对
+        let u = CodexUsage.parse(data(#"{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":36,"reset_at":1764655200,"limit_window_seconds":18000},"secondary_window":{"used_percent":"22.6","reset_at":1764999999,"limit_window_seconds":604800}}}"#))!
+        XCTAssertEqual(u.fiveHour?.remainingPercent, 64)
+        XCTAssertEqual(u.weekly?.remainingPercent, 77)
+        XCTAssertEqual(u.weekly?.resetsAt, Date(timeIntervalSince1970: 1764999999))
+        let w = CodexUsage.parse(data(#"{"rate_limit":{"primary_window":{"used_percent":23,"reset_at":1,"limit_window_seconds":604800},"secondary_window":null}}"#))!
+        XCTAssertEqual(w.weekly?.remainingPercent, 77)
+        XCTAssertNil(w.fiveHour)
+    }
+
+    func testCodexCredential() {
+        XCTAssertEqual(CodexCredential.parse(data(#"{"OPENAI_API_KEY":"sk-x","tokens":null}"#)), .apiKey)
+        XCTAssertEqual(CodexCredential.parse(data(#"{"tokens":{"access_token":"a","id_token":"i","account_id":"c"}}"#)),
+                       .oauth(accessToken: "a", idToken: "i", accountID: "c"))
+        XCTAssertEqual(CodexCredential.parse(data("{}")), CodexCredential.none)
+    }
+
+    func testCodexAccountClaims() {
+        func b64(_ s: String) -> String {
+            Data(s.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")
+                .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        }
+        let iso = "x." + b64(#"{"email":"allen@example.com","https://api.openai.com/auth":{"chatgpt_plan_type":"pro","chatgpt_subscription_active_until":"2026-12-12T08:00:00+00:00"}}"#) + ".y"
+        let a = CodexAccount.from(idToken: iso)!
+        XCTAssertEqual(a.email, "allen@example.com")
+        XCTAssertEqual(a.planRaw, "pro")
+        XCTAssertEqual(a.subscriptionUntil, Date(timeIntervalSince1970: 1_797_062_400))
+        let num = "x." + b64(#"{"https://api.openai.com/auth":{"chatgpt_subscription_active_until":1797062400}}"#) + ".y"
+        XCTAssertEqual(CodexAccount.from(idToken: num)?.subscriptionUntil, Date(timeIntervalSince1970: 1_797_062_400))
+    }
+
+    func testProfileDaily() {
+        let d = CodexProfile.parseDaily(data(#"{"stats":{"daily_usage_buckets":[{"start_date":"2026-11-23","tokens":304000000},{"start_date":"2026-11-24","tokens":52000000}]}}"#))!
+        XCTAssertEqual(d["2026-11-23"], 304_000_000)
+        XCTAssertNil(CodexProfile.parseDaily(data(#"{"stats":{}}"#)))
+    }
+
+    func testSessionLogOnlyLastUsage() {
+        let text = """
+        {"timestamp":"2026-11-24T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":5200,"output_tokens":310,"total_tokens":5510},"total_token_usage":{"total_tokens":999999}}}}
+        {"timestamp":"2026-11-24T02:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20}}}}
+        {"timestamp":"2026-11-24T03:00:00Z","type":"event_msg","payload":{"type":"token_count","info":null}}
+        not json token_count
+        {"timestamp":"2026-11-24T04:00:00Z","type":"response_item","payload":{"type":"message"}}
+        """
+        var daily: [String: Int64] = [:]
+        CodexSessionLog.accumulate(text, into: &daily, calendar: TokenSeries.calendar(timeZone: TimeZone(identifier: "UTC")!))
+        XCTAssertEqual(daily, ["2026-11-24": 5630])
+    }
+
+    func testGeminiCredentialKeychainPrefix() {
+        let json = #"{"token":{"access_token":"ya29","refresh_token":"r","expiry":"2026-11-24T20:30:00Z"},"id_token":"e"}"#
+        let kc = GeminiCredential.keychainPrefix + Data(json.utf8).base64EncodedString()
+        let a = GeminiCredential.parse(data(json))!, b = GeminiCredential.parse(data(kc))!
+        XCTAssertEqual(a, b)
+        XCTAssertEqual(a.accessToken, "ya29")
+        XCTAssertTrue(a.isExpired(now: Date(timeIntervalSince1970: 1_800_000_000)))
+    }
+
+    func testGeminiAssist() {
+        let a = GeminiAssist.parse(data(#"{"cloudaicompanionProject":"p1","currentTier":{"id":"free-tier","name":"Free"},"paidTier":{"id":"g1-pro-tier"}}"#))!
+        XCTAssertEqual(a.planName, "Pro")
+        XCTAssertEqual(a.project, "p1")
+        let b = GeminiAssist.parse(data(#"{"cloudaicompanionProject":{"id":"p2"},"currentTier":{"id":"standard-tier"}}"#))!
+        XCTAssertEqual(b.planName, "Standard")
+        XCTAssertEqual(b.project, "p2")
+        XCTAssertNil(GeminiAssist.parse(data("{}"))!.project)
+    }
+
+    func testGeminiQuotaMissingFractionIsZero() {
+        let q = GeminiQuota.parse(data(#"{"groups":[{"buckets":[{"bucketId":"gemini-weekly","remainingFraction":0.44},{"bucketId":"gemini-5h","resetTime":"2026-11-24T22:54:47Z"}]},{"buckets":[{"bucketId":"3p-weekly","remainingFraction":1}]}]}"#))!
+        XCTAssertEqual(q.weekly?.remainingPercent, 44)
+        XCTAssertEqual(q.fiveHour?.remainingPercent, 0)
+        XCTAssertNotNil(q.fiveHour?.resetsAt)
+    }
+
+    func testPlanTableRows() {
+        let rows: [(String, String)] = [("free", "Free"), ("plus", "Plus"), ("prolite", "Pro 100"), ("pro-lite", "Pro 100"),
+            ("pro", "Pro 200"), ("promax", "Pro 500"), ("pro-max", "Pro 500"), ("team", "Team"),
+            ("chatgpt_business", "Business"), ("enterprise", "Enterprise"), ("k12_edu", "Edu"), ("other", "other")]
+        for (raw, name) in rows { XCTAssertEqual(Fmt.codexPlanName(raw), name, raw) }
+    }
+
+    func testTokenBars() {
+        let cal = TokenSeries.calendar(timeZone: TimeZone(identifier: "UTC")!)
+        let now = Date(timeIntervalSince1970: 1_795_478_400 + 3_600) // 2026-11-24 01:00 UTC（周二）
+        let official: [String: Int64] = ["2026-11-23": 304_000_000, "2026-11-24": 5]
+        let local: [String: Int64] = ["2026-11-24": 7, "2026-11-01": 9]
+        let d = TokenSeries.bars(range: .daily, official: official, local: local, now: now, calendar: cal)
+        XCTAssertEqual(d.count, 30)
+        XCTAssertEqual(d.last?.key, "2026-11-24")
+        XCTAssertEqual(d.last?.value, 5)
+        XCTAssertEqual(d[28].label, "11月23日")
+        let w = TokenSeries.bars(range: .weekly, official: official, local: local, now: now, calendar: cal)
+        XCTAssertEqual(w.count, 12)
+        XCTAssertEqual(w.last?.key, "2026-11-23")
+        XCTAssertEqual(w.last?.label, "11月23日–11月29日")
+        XCTAssertEqual(w.last?.official, 304_000_005)
+        let m = TokenSeries.bars(range: .monthly, official: nil, local: local, now: now, calendar: cal)
+        XCTAssertEqual(m.count, 6)
+        XCTAssertEqual(m.last?.label, "2026年11月")
+        XCTAssertEqual(m.last?.value, 16)
+        XCTAssertFalse(m.last!.usesOfficial)
+    }
+}

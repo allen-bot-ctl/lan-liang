@@ -13,3 +13,5 @@ macOS 菜单栏小工具：显示 Codex 与 Gemini（Google Antigravity 登录�
 - 纯逻辑：`Sources/LanLiangCore`，`swift test` 运行单测。
 - 界面：`App/`，`scripts/build.sh VERSION` 在 macOS 上打包。
 - CI：推送 master 触发 `.github/workflows/ci.yml`（单测、打包、冒烟、截图）。
+
+数据来源参考了开源项目 [Quosparr](https://github.com/Licoy/Quosparr)，本项目代码为独立实现。
