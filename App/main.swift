@@ -24,8 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let model = PanelModel()
     private var items: [Service: NSStatusItem] = [:]
     private var fallbackItem: NSStatusItem!
-    private var panel: FloatingPanel!
-    private var host: NSHostingView<PanelView>!
+    private var panel: FloatingPanel?
+    private var host: NSHostingView<PanelView>?
     private var outsideMonitor: Any?
     private let contextMenu = NSMenu()
     private let loginItem = NSMenuItem(title: "登录时启动", action: #selector(toggleLogin), keyEquivalent: "")
@@ -71,15 +71,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let quit = NSMenuItem(title: "退出栏量", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         contextMenu.addItem(quit)
-
-        host = NSHostingView(rootView: PanelView(model: model))
-        panel = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 300),
-                              styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.isFloatingPanel = true
-        panel.level = .statusBar
-        panel.hasShadow = true
-        panel.backgroundColor = .windowBackgroundColor
-        panel.contentView = host
 
         if !isDebug { enableLoginOnFirstLaunch() }
         updateMenuBar()
@@ -164,7 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item?.menu = nil
             return
         }
-        if panel.isVisible { hidePanel(); return }
+        if panel?.isVisible == true { hidePanel(); return }
         if sender.tag == 1 { model.tab = .gemini } else if sender.tag == 0 { model.tab = .codex }
         showPanel(from: sender)
         refresh()
@@ -172,9 +163,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: 面板
 
+    /// 面板第一次打开时才创建（SwiftUI/Charts 不在启动时渲染）。
+    private func ensurePanel() {
+        guard panel == nil else { return }
+        let h = NSHostingView(rootView: PanelView(model: model))
+        let p = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 300),
+                              styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.isFloatingPanel = true
+        p.level = .statusBar
+        p.hasShadow = true
+        p.backgroundColor = .windowBackgroundColor
+        p.contentView = h
+        host = h
+        panel = p
+    }
+
     private func showPanel(from button: NSButton?) {
+        ensurePanel()
         guard let button = button, let win = button.window else { return }
         let r = win.convertToScreen(button.convert(button.bounds, to: nil))
+        guard let panel = panel, let host = host else { return }
         let size = host.fittingSize
         var x = r.minX
         if let screen = win.screen ?? NSScreen.main {
@@ -190,13 +198,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func hidePanel() {
-        panel.orderOut(nil)
+        panel?.orderOut(nil)
         if let m = outsideMonitor { NSEvent.removeMonitor(m); outsideMonitor = nil }
     }
 
     /// 内容变化后保持面板顶边不动、高度跟内容走。
     private func fitPanel() {
-        guard panel.isVisible else { return }
+        guard let panel = panel, panel.isVisible else { return }
+        guard let host = host else { return }
         let size = host.fittingSize
         var f = panel.frame
         f.origin.y = f.maxY - size.height
@@ -267,7 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             union = union.map { $0.union(r) } ?? r
         }
         if let u = union { print("DEBUG_RECT_ITEM \(top(u))") }
-        print("DEBUG_RECT_PANEL \(top(panel.frame))")
+        if let p = panel { print("DEBUG_RECT_PANEL \(top(p.frame))") }
         let groups = Service.allCases.compactMap { s in MenuBarText.group(for: s, snapshot: model.snapshot(s)) }
             .map { "\($0.service.rawValue):\($0.primary)\($0.secondary.map { "+" + $0 } ?? "")" }
         print("DEBUG_MENUBAR groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ","))")
