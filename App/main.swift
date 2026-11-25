@@ -72,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let loginItem = NSMenuItem(title: "登录时启动", action: #selector(toggleLogin), keyEquivalent: "")
     private var timer: Timer?
     private var subs: Set<AnyCancellable> = []
+    private var appearanceObservation: NSKeyValueObservation?
     private lazy var source: DataSource = makeDataSource()
     private let args = CommandLine.arguments
     private var isDebug: Bool { args.contains { $0.hasPrefix("--debug-") } || ProcessInfo.processInfo.environment["LANLIANG_FAKE"] != nil }
@@ -122,6 +123,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.onReauthorizeKeychain = { [weak self] in self?.source.allowKeychainAgain(); self?.refresh() }
 
         statusItem = makeItem()
+        // 菜单栏深浅色变化（系统外观、壁纸着色）时重画，文字颜色跟着变（0.3.2）。
+        appearanceObservation = statusItem.button?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.updateMenuBar() }
+        }
 
         loginItem.target = self
         contextMenu.delegate = self
@@ -205,7 +210,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let b = statusItem.button else { return }
         let rs = rows
         let large = largeMenuBar
-        if let img = MenuBarLayout.image(rs, height: NSStatusBar.system.thickness, large: large) {
+        // 0.3.2：内容图不是模板图（5 小时剩余画品牌橙），颜色按按钮当前外观解析。
+        if let img = MenuBarLayout.image(rs, height: NSStatusBar.system.thickness, large: large,
+                                         appearance: b.effectiveAppearance) {
             b.image = img
             statusItem.length = ceil(MenuBarLayout.width(rs, large: large)) + itemPadding
         } else {
@@ -530,6 +537,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let large = largeMenuBar
         let content = String(format: "%.1f", MenuBarLayout.width(rs, large: large))
         let style = rs.count >= 2 ? "compact" : (large ? "large" : "single")
+        let cells = rs.map { "\($0.service.rawValue):\(MenuBarLayout.cellText($0))" }.joined(separator: ",")
+        let dark = (statusItem.button?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua) ? 1 : 0
+        print("DEBUG_MENUBAR_WIDTH content=\(content) item=\(Int(itemWidth)) style=\(rs.count >= 2 ? "compact" : (large ? "large" : "single"))")
+        print("DEBUG_MENUBAR_CELLS cells=\(cells.isEmpty ? "fallback" : cells) dark=\(dark) template=\(statusItem.button?.image?.isTemplate == true ? 1 : 0)")
         print("DEBUG_MENUBAR items=\(statusItemCount) visible=\(statusItem.isVisible ? 1 : 0) autosave=\(statusItem.autosaveName ?? "") rows=\(rs.count) content=\(content) item=\(Int(itemWidth)) groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ",")) services=\(model.services.debugText) style=\(style)")
         fflush(stdout)
     }

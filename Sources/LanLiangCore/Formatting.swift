@@ -24,16 +24,18 @@ public enum Fmt {
         return raw!
     }
 
-    /// Token 数：<1万原样，≥1万用「万」，≥1亿用「亿」，两位小数。
+    /// Token 数：<1万原样，≥1万用「万」，≥1亿用「亿」，两位小数；末尾正好是「.00」时省略（契约 0.3.2 §5）：
+    /// 「2100万」「3亿」「3.35亿」「3.50亿」「1.23万」。
     public static func tokens(_ n: Int64) -> String {
-        if n >= 100_000_000 { return String(format: "%.2f亿", Double(n) / 100_000_000) }
-        if n >= 10_000 { return String(format: "%.2f万", Double(n) / 10_000) }
+        func trim(_ s: String) -> String { s.hasSuffix(".00") ? String(s.dropLast(3)) : s }
+        if n >= 100_000_000 { return trim(String(format: "%.2f", Double(n) / 100_000_000)) + "亿" }
+        if n >= 10_000 { return trim(String(format: "%.2f", Double(n) / 10_000)) + "万" }
         return "\(n)"
     }
 
     /// 用量图纵轴刻度（契约 0.1.5 §3）：≥1 亿「x.xx亿」，≥1000 万不带小数「4450万」，其余同 tokens。
     public static func axisTokens(_ n: Int64) -> String {
-        if n >= 100_000_000 { return tokens(n) }
+        if n >= 100_000_000 { return String(format: "%.2f亿", Double(n) / 100_000_000) }   // 刻度规则不变（0.3.2）
         if n >= 10_000_000 { return "\(Int64((Double(n) / 10_000).rounded()))万" }
         return tokens(n)
     }

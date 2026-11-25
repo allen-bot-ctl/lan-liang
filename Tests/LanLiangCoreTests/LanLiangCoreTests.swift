@@ -373,33 +373,35 @@ final class V012Tests: XCTestCase {
         let bothWeekly = MenuBarLayout.width([row(.codex, "100%", nil), row(.gemini, "100%", nil)])
         print("MENUBAR_WIDTH two_rows_5h=\(both5h) two_rows_weekly=\(bothWeekly)")
         XCTAssertLessThanOrEqual(both5h, 75)
-        XCTAssertLessThanOrEqual(bothWeekly, 55)
-        XCTAssertLessThan(bothWeekly, both5h)
+        // 0.3.2：没有 5 小时也留第三列写「--」（竖线一直在）
+        XCTAssertLessThanOrEqual(bothWeekly, both5h)
+        XCTAssertGreaterThan(bothWeekly, MenuBarLayout.positions([row(.codex, "100%", nil), row(.gemini, "100%", nil)]).secondary)
     }
 
-    func testMenuBarWidthStable() {
-        let a = MenuBarLayout.width([row(.codex, "9%", "5"), row(.gemini, "100%", nil)])
+    func testMenuBarWidthFollowsText() {
+        // 0.3.2（PM 04:52）：不按「100%」补齐，位数少宽度就窄；两行按较宽的一行对齐。
+        XCTAssertLessThan(MenuBarLayout.width([row(.codex, "9%", nil)]), MenuBarLayout.width([row(.codex, "100%", nil)]))
+        let a = MenuBarLayout.width([row(.codex, "9%", "5"), row(.gemini, "100%", "100")])
         let b = MenuBarLayout.width([row(.codex, "100%", "100"), row(.gemini, "100%", "100")])
-        let c = MenuBarLayout.width([row(.codex, "--", nil), row(.gemini, "…", "64")])
-        XCTAssertEqual(a, b); XCTAssertEqual(b, c)
-        XCTAssertEqual(MenuBarLayout.width([row(.codex, "9%", nil)]), MenuBarLayout.width([row(.codex, "100%", nil)]))
+        XCTAssertEqual(a, b)
     }
 
     func testSingleRowNoReservedSpace() {
         let single = MenuBarLayout.width([row(.codex, "100%", nil)])
         let single5h = MenuBarLayout.width([row(.gemini, "100%", "100")])
         print("MENUBAR_WIDTH single_weekly=\(single) single_5h=\(single5h)")
-        XCTAssertLessThan(single, single5h)          // 没 5 小时不留空
+        XCTAssertLessThanOrEqual(single, single5h)   // 0.3.2：没 5 小时写「--」，不留空
         XCTAssertEqual(MenuBarLayout.style(rowCount: 1).primaryFont.pointSize, 12)
         XCTAssertEqual(MenuBarLayout.style(rowCount: 2).primaryFont.pointSize, 9.5)
         XCTAssertEqual(MenuBarLayout.width([]), 0)
         XCTAssertNil(MenuBarLayout.image([], height: 22))
     }
 
-    func testMenuBarImageIsTemplate() {
+    func testMenuBarImageNotTemplate() {
+        // 0.3.2：5 小时剩余画品牌橙，不能是模板图
         let img = MenuBarLayout.image([row(.codex, "74%", "64"), row(.gemini, "100%", nil)], height: 22)
         XCTAssertNotNil(img)
-        XCTAssertTrue(img!.isTemplate)
+        XCTAssertFalse(img!.isTemplate)
         XCTAssertEqual(img!.size.height, 22)
     }
     #endif
@@ -888,14 +890,25 @@ final class ProtoScanTests: XCTestCase {
 
 final class AxisTickTests: XCTestCase {
     func testTicks() {
-        XCTAssertEqual(Fmt.axisTokens(9_990_000), "999.00万")
+        XCTAssertEqual(Fmt.axisTokens(9_990_000), "999万")
         XCTAssertEqual(Fmt.axisTokens(10_000_000), "1000万")
         XCTAssertEqual(Fmt.axisTokens(44_500_000), "4450万")
         XCTAssertEqual(Fmt.axisTokens(335_000_000), "3.35亿")
         XCTAssertEqual(Fmt.axisTokens(0), "0")
-        // 悬停格式不变
-        XCTAssertEqual(Fmt.tokens(44_500_000), "4450.00万")
-        XCTAssertEqual(Fmt.tokens(9_990_000), "999.00万")
+        // 0.3.2：悬停里「万」不再带多余的 .00，和刻度一致
+        XCTAssertEqual(Fmt.tokens(44_500_000), "4450万")
+        XCTAssertEqual(Fmt.tokens(21_000_000), "2100万")
+        XCTAssertEqual(Fmt.tokens(21_003_700), "2100.37万")   // 只省略 .00
+        XCTAssertEqual(Fmt.tokens(300_000_000), "3亿")
+        XCTAssertEqual(Fmt.tokens(350_000_000), "3.50亿")
+        XCTAssertEqual(Fmt.axisTokens(300_000_000), "3.00亿")  // 刻度规则不变
+        XCTAssertEqual(Fmt.tokens(9_990_000), "999万")
+        XCTAssertEqual(Fmt.tokens(12_345), "1.23万")
+        XCTAssertEqual(Fmt.tokens(15_000), "1.50万")
+        XCTAssertEqual(Fmt.tokens(10_000), "1万")
+        XCTAssertEqual(Fmt.tokens(9_999), "9999")
+        XCTAssertEqual(Fmt.tokens(99_999_999), "9999.99万")
+        XCTAssertEqual(Fmt.axisTokens(21_000_000), Fmt.tokens(21_000_000))
         XCTAssertEqual(Fmt.tokens(335_000_000), "3.35亿")
     }
 }
@@ -1210,7 +1223,7 @@ final class ServiceSelectionTests: XCTestCase {
         print("MENUBAR_WIDTH large_single_5h=\(large) single_5h=\(normal)")
         XCTAssertGreaterThan(large, normal)
         // 宽度只按最长文案定，数字变化不跳
-        XCTAssertEqual(MenuBarLayout.width([MenuBarGroup(service: .codex, primary: "8%", secondary: "5")], large: true), large)
+        XCTAssertLessThan(MenuBarLayout.width([MenuBarGroup(service: .codex, primary: "8%", secondary: "5")], large: true), large)
         XCTAssertNotNil(MenuBarLayout.image(r, height: 22, large: true))
     }
     #endif
@@ -1386,7 +1399,7 @@ final class StackedSeriesTests: XCTestCase {
 
     func testTipLines() {
         let s = StackedSeries.bars(range: .daily, codex: codex, gemini: gemini, now: now, calendar: cal).last!
-        XCTAssertEqual(StackedSeries.tipLines(s), ["11月25日", "Codex 3.20亿", "Gemini 4000.00万", "合计 3.60亿 Tokens"])
+        XCTAssertEqual(StackedSeries.tipLines(s), ["11月25日", "Codex 3.20亿", "Gemini 4000万", "合计 3.60亿 Tokens"])
     }
 
     func testAxisMaxIsLargestTotal() {
@@ -1412,3 +1425,62 @@ final class StackedSeriesTests: XCTestCase {
         }
     }
 }
+
+// MARK: 0.3.2 菜单栏三列：图标 | 周剩余 | 细竖线 | 5 小时（橙）/「--」（灰）
+
+#if canImport(AppKit)
+final class MenuBarV032Tests: XCTestCase {
+    private func row(_ s: Service, _ p: String, _ f: String?) -> MenuBarGroup { MenuBarGroup(service: s, primary: p, secondary: f) }
+
+    func testPlaceholderWhenNoFiveHour() {
+        XCTAssertEqual(MenuBarLayout.secondaryText(row(.codex, "77%", nil)).text, "--")
+        XCTAssertTrue(MenuBarLayout.secondaryText(row(.codex, "77%", nil)).isPlaceholder)
+        XCTAssertEqual(MenuBarLayout.secondaryText(row(.gemini, "44%", "64")).text, "64")
+        XCTAssertFalse(MenuBarLayout.secondaryText(row(.gemini, "44%", "64")).isPlaceholder)
+        XCTAssertEqual(MenuBarLayout.cellText(row(.codex, "77%", nil)), "77%|--")
+        XCTAssertEqual(MenuBarLayout.cellText(row(.gemini, "44%", "64")), "44%|64")
+    }
+
+    func testColumnsOrderedWithDivider() {
+        for (rows, large) in [([row(.codex, "77%", nil)], true), ([row(.codex, "77%", nil)], false),
+                              ([row(.codex, "77%", nil), row(.gemini, "44%", "64")], false)] {
+            let st = MenuBarLayout.style(rowCount: rows.count, large: large)
+            let p = MenuBarLayout.positions(rows, large: large)
+            let c = MenuBarLayout.columns(rows, large: large)
+            // 周剩余紧跟图标：中间只有 gapAfterIcon
+            XCTAssertEqual(p.primary, st.iconColumn + st.gapAfterIcon)
+            XCTAssertLessThanOrEqual(st.gapAfterIcon, 2)
+            // 竖线在两列中间，左右空隙相同
+            XCTAssertEqual(p.divider - MenuBarLayout.dividerWidth / 2 - (p.primary + c.primary), st.gapAroundDivider, accuracy: 0.001)
+            XCTAssertEqual(p.secondary - (p.divider + MenuBarLayout.dividerWidth / 2), st.gapAroundDivider, accuracy: 0.001)
+            XCTAssertEqual(MenuBarLayout.width(rows, large: large), p.secondary + c.secondary, accuracy: 0.001)
+        }
+    }
+
+    func testIconGapCompressed() {
+        // 契约 0.3.2 §2：图标列等于图标字号，图标后 compact 1.5 / single 2 / large 2
+        XCTAssertEqual(MenuBarLayout.large.iconColumn, 15); XCTAssertEqual(MenuBarLayout.large.gapAfterIcon, 2)
+        XCTAssertEqual(MenuBarLayout.single.iconColumn, 13); XCTAssertEqual(MenuBarLayout.single.gapAfterIcon, 2)
+        XCTAssertEqual(MenuBarLayout.compact.iconColumn, 9); XCTAssertEqual(MenuBarLayout.compact.gapAfterIcon, 1.5)
+        XCTAssertEqual(MenuBarLayout.dividerWidth, 0.5)
+        XCTAssertEqual(MenuBarLayout.compact.dividerHeight, 7); XCTAssertEqual(MenuBarLayout.large.dividerHeight, 11)
+        XCTAssertEqual(MenuBarLayout.compact.gapAroundDivider, 3); XCTAssertEqual(MenuBarLayout.large.gapAroundDivider, 3)
+        let w = MenuBarLayout.width([row(.codex, "100%", "100")], large: true)
+        print("MENUBAR_WIDTH v032 large_single=\(w) single=\(MenuBarLayout.width([row(.codex, "100%", "100")])) two_rows=\(MenuBarLayout.width([row(.codex, "100%", "100"), row(.gemini, "100%", "100")]))")
+    }
+
+    func testOrangeLegibleBothAppearances() {
+        let light = MenuBarLayout.secondaryColor(dark: false), dark = MenuBarLayout.secondaryColor(dark: true)
+        // 契约 0.3.2 §3：浅色 #C25400，深色 #FF9F0A
+        XCTAssertEqual(light.redComponent, 0xC2 / 255, accuracy: 0.002)
+        XCTAssertEqual(light.greenComponent, 0x54 / 255, accuracy: 0.002)
+        XCTAssertEqual(dark.redComponent, 1, accuracy: 0.002)
+        XCTAssertEqual(dark.greenComponent, 0x9F / 255, accuracy: 0.002)
+        XCTAssertEqual(dark.blueComponent, 0x0A / 255, accuracy: 0.002)
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            let img = MenuBarLayout.image([row(.codex, "77%", nil)], height: 22, large: true, appearance: NSAppearance(named: name))
+            XCTAssertNotNil(img?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        }
+    }
+}
+#endif

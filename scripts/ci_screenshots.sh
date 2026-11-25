@@ -128,6 +128,30 @@ for ap in dark light; do
     [ "$(cut -d, -f3 <<<"$r")" = 520 ] || { echo "::error::设置窗口宽度不是 520: $r"; exit 1; }
   done
 done
+# 0.3.2：菜单栏三列（图标 | 周剩余 | 细竖线 | 5 小时橙色 /「--」灰色），不是模板图。
+for ap in dark light; do
+  if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
+  nf="$PWD/fixtures/normal.json"
+  LANLIANG_FAKE="$nf" shoot "-v032-mb-both-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex,gemini
+  LANLIANG_FAKE="$PWD/fixtures/codex-5h.json" shoot "-v032-mb-both-5h-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex,gemini
+  LANLIANG_FAKE="$nf" shoot "-v032-mb-codex-no5h-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex
+  LANLIANG_FAKE="$PWD/fixtures/codex-5h.json" shoot "-v032-mb-codex-5h-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex
+  LANLIANG_FAKE="$nf" shoot "-v032-mb-gemini-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=gemini
+  LANLIANG_FAKE="$PWD/fixtures/max.json" shoot "-v032-mb-max-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex,gemini
+done
+v032cells() {  # $1=用例 $2=应有的 cells
+  for ap in dark light; do
+    l=$(grep -h "^DEBUG_MENUBAR_CELLS" "/tmp/shots--$1-$ap.log" | tail -n 1)
+    echo "RELEASE: v032 $1 $ap: $l | $(grep -h "^DEBUG_MENUBAR " "/tmp/shots--$1-$ap.log" | tail -n 1 | sed -E 's/.*(content=[^ ]+ item=[^ ]+).*/\1/')"
+    [ "$(sed -E 's/.* cells=([^ ]+).*/\1/' <<<"$l")" = "$2" ] || { echo "::error::$1-$ap 菜单栏格子不对: $l（应为 $2）"; exit 1; }
+    grep -q " template=0" <<<"$l" || { echo "::error::$1-$ap 菜单栏还是模板图: $l"; exit 1; }
+  done
+}
+v032cells v032-mb-both 'codex:77%|--,gemini:44%|64'
+v032cells v032-mb-codex-no5h 'codex:77%|--'
+v032cells v032-mb-gemini 'gemini:44%|64'
+v032cells v032-mb-codex-5h 'codex:77%|36'
+v032cells v032-mb-max 'codex:100%|100,gemini:100%|100'
 # 0.2.1：快速来回切页签 20/21 次后（停在 Codex / Gemini），面板顶边不动、内容视图和窗口一致。
 for ap in dark light; do
   if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
@@ -154,13 +178,13 @@ for ap in dark light; do
   if defaults read "$BUNDLE_ID" "NSStatusItem Visible Item-0" >/dev/null 2>&1; then
     echo "::error::启动后旧键 NSStatusItem Visible Item-0 还在"; exit 1
   fi
-  l=$(grep -h "^DEBUG_MENUBAR" "/tmp/shots--stale-prefs-codex-daily-$ap.log" | tail -n 1)
+  l=$(grep -h "^DEBUG_MENUBAR " "/tmp/shots--stale-prefs-codex-daily-$ap.log" | tail -n 1)
   echo "RELEASE: stale-prefs $ap: $l"
   grep -q " visible=1 " <<<"$l" && grep -q " items=1 " <<<"$l" && grep -q " autosave=lanliang.main " <<<"$l" \
     || { echo "::error::带旧偏好启动后状态项不可见: $l"; exit 1; }
 done
 # 菜单栏：唯一一个状态项、每行文字、内容宽度（契约 0.1.2 §2/§3）。
-mbline() { grep -h "^DEBUG_MENUBAR" "/tmp/shots--$1-$2.log" | tail -n 1; }
+mbline() { grep -h "^DEBUG_MENUBAR " "/tmp/shots--$1-$2.log" | tail -n 1; }
 field() { sed -E "s/.* $2=([^ ]+).*/\1/" <<<"$1"; }
 chk() {
   for ap in dark light; do
@@ -200,10 +224,10 @@ lim() {  # $1=用例 $2=上限
   python3 -c "import sys; sys.exit(0 if float('$w') <= $2 else 1)" || { echo "::error::$1 菜单栏宽 ${w}pt 超过 $2pt"; exit 1; }
 }
 lim max-codex-daily 75
-lim both-weekly-codex-daily 55
-# 数字从 8% 变到 100% 宽度不跳：同样的列（两行都有 5 小时）宽度必须相同。
+lim both-weekly-codex-daily 75   # 0.3.2：没有 5 小时也留第三列写「--」
+# 状态项宽度（只打印）。
 a=$(field "$(mbline low-codex-daily dark)" item); b=$(field "$(mbline max-codex-daily dark)" item); c=$(field "$(mbline codex-5h-codex-daily dark)" item)
 echo "RELEASE: item width low=$a max=$b codex-5h=$c"
-[ "$a" = "$b" ] && [ "$b" = "$c" ] || { echo "::error::数字变化时状态项宽度跳动"; exit 1; }
+# 0.3.2（PM 04:52 定）：宽度按实际文字，位数变化时宽度跟着变，不再要求相同。
 grep -h "^DEBUG_" /tmp/shots-*.log | sed 's/^/RELEASE: /'
 ls -l shots
