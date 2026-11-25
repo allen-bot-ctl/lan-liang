@@ -74,7 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.hoverKey = argValue("debug-hover")
         model.onRefresh = { [weak self] in self?.refresh() }
         // 切页签、切区间、历史结果到达后，面板高度跟着内容走。
-        model.$tab.map { _ in () }.merge(with: model.$range.map { _ in () }, model.$geminiHistory.map { _ in () })
+        model.$tab.map { _ in () }.merge(with: model.$range.map { _ in () }, model.$geminiHistory.map { _ in () },
+                                          model.$officialLoaded.map { _ in () })
             .sink { [weak self] _ in DispatchQueue.main.async { self?.fitPanel() } }
             .store(in: &subs)
         model.onReauthorizeKeychain = { [weak self] in self?.source.allowKeychainAgain(); self?.refresh() }
@@ -231,17 +232,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refresh() {
         guard !model.refreshing else { return }
         model.refreshing = true
-        source.refresh(current: (model.codex, model.gemini)) { [weak self] result in
-            guard let self = self else { return }
-            self.model.codex = result.codex
-            self.model.gemini = result.gemini
-            self.model.official = result.official
-            self.model.local = result.local
-            if let now = result.now { self.model.now = { now } }
-            self.model.refreshing = false
-            self.updateMenuBar()
-            DispatchQueue.main.async { self.fitPanel() }
-        }
+        if let now = source.fixedNow { model.now = { now } }
+        // 两家额度各自到了就各自更新菜单栏和面板（契约 0.1.5 §5）。
+        source.refresh(current: (model.codex, model.gemini), handlers: RefreshHandlers(
+            onCodex: { [weak self] s in
+                guard let self = self else { return }
+                self.model.codex = s
+                self.updateMenuBar()
+                DispatchQueue.main.async { self.fitPanel() }
+            },
+            onCodexOfficial: { [weak self] o in
+                self?.model.official = o
+                self?.model.officialLoaded = true
+            },
+            onGemini: { [weak self] s in
+                guard let self = self else { return }
+                self.model.gemini = s
+                self.updateMenuBar()
+                DispatchQueue.main.async { self.fitPanel() }
+            },
+            onAllDone: { [weak self] in self?.model.refreshing = false }))
         // Gemini 本机历史单独在后台扫，不拖慢额度和菜单栏。
         source.refreshGeminiHistory { [weak self] h in self?.model.geminiHistory = h }
     }

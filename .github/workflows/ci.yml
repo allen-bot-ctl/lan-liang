@@ -49,6 +49,14 @@ jobs:
           echo "RELEASE: $(grep -E 'Executed [0-9]+ tests' /tmp/tests.log | tail -n 1)"
           exit "$status"
 
+      - name: No Codex session-log reading (contract 0.1.5 §5)
+        shell: bash
+        run: |
+          if grep -rnE '"(archived_)?sessions"|\.jsonl|CodexSessionLog' App Sources; then
+            echo "::error::代码里不应再读取 ~/.codex/sessions"; exit 1
+          fi
+          echo "RELEASE: no ~/.codex/sessions reads"
+
       - name: Build universal app, dmg, zip
         run: scripts/build.sh "$VERSION"
 

@@ -5,9 +5,8 @@ public struct FakeData: Codable, Equatable {
     public var now: Date?
     public var codex: ServiceSnapshot
     public var gemini: ServiceSnapshot
-    /// nil = 官方接口失败（柱高用本机值，标题旁写「仅本机」）。
+    /// nil = 官方接口失败（图区显示「官方用量暂时拿不到」）。
     public var official: [String: Int64]?
-    public var local: [String: Int64]
     /// Gemini 本机 Token 历史；nil = 首次扫描没完成（面板显示「正在统计…」）。
     public var geminiHistory: GeminiHistory?
 

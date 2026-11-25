@@ -124,19 +124,6 @@ final class ParserTests: XCTestCase {
         XCTAssertNil(CodexProfile.parseDaily(data(#"{"stats":{}}"#)))
     }
 
-    func testSessionLogOnlyLastUsage() {
-        let text = """
-        {"timestamp":"2026-11-24T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":5200,"output_tokens":310,"total_tokens":5510},"total_token_usage":{"total_tokens":999999}}}}
-        {"timestamp":"2026-11-24T02:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20}}}}
-        {"timestamp":"2026-11-24T03:00:00Z","type":"event_msg","payload":{"type":"token_count","info":null}}
-        not json token_count
-        {"timestamp":"2026-11-24T04:00:00Z","type":"response_item","payload":{"type":"message"}}
-        """
-        var daily: [String: Int64] = [:]
-        CodexSessionLog.accumulate(text, into: &daily, calendar: TokenSeries.calendar(timeZone: TimeZone(identifier: "UTC")!))
-        XCTAssertEqual(daily, ["2026-11-24": 5630])
-    }
-
     func testGeminiCredentialKeychainPrefix() {
         let json = #"{"token":{"access_token":"ya29","refresh_token":"r","expiry":"2026-11-24T20:30:00Z"},"id_token":"e"}"#
         let kc = GeminiCredential.keychainPrefix + Data(json.utf8).base64EncodedString()
@@ -1050,3 +1037,51 @@ final class GeminiDiskCacheTests: GeminiDBTestCase {
     }
 }
 #endif
+
+// MARK: 0.1.5 §5 额度先出、不读 Codex 本机日志
+
+final class RefreshCoordinatorTests: XCTestCase {
+    func testQuotaNotBlockedBySlowScanOrHungService() {
+        // Gemini 本机扫描人为延迟 10 秒（在自己的后台队列上），不影响额度。
+        let flags = Flags()
+        DispatchQueue(label: "test.scan", qos: .userInitiated).async { Thread.sleep(forTimeInterval: 10); flags.set("scan") }
+        let codexArrived = expectation(description: "codex")
+        let start = Date()
+        var codexDelay: TimeInterval = -1
+        RefreshCoordinator.run(
+            codex: { try? await Task.sleep(nanoseconds: 100_000_000); return "codex" },
+            gemini: { try? await Task.sleep(nanoseconds: 60_000_000_000); return "gemini" },   // 卡住
+            onCodex: { v in XCTAssertEqual(v, "codex"); codexDelay = Date().timeIntervalSince(start); codexArrived.fulfill() },
+            onGemini: { _ in flags.set("gemini") },
+            onAllDone: { flags.set("done") })
+        wait(for: [codexArrived], timeout: 2)
+        XCTAssertLessThan(codexDelay, 1.5)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertFalse(flags.has("gemini")); XCTAssertFalse(flags.has("done")); XCTAssertFalse(flags.has("scan"))
+    }
+
+    final class Flags {
+        private let lock = NSLock(); private var s = Set<String>()
+        func set(_ k: String) { lock.lock(); s.insert(k); lock.unlock() }
+        func has(_ k: String) -> Bool { lock.lock(); defer { lock.unlock() }; return s.contains(k) }
+    }
+
+    func testEachDeliveredIndependentlyThenAllDone() {
+        let g = expectation(description: "gemini first"), c = expectation(description: "codex"), d = expectation(description: "done")
+        var order: [String] = []
+        RefreshCoordinator.run(
+            codex: { try? await Task.sleep(nanoseconds: 300_000_000); return 1 },
+            gemini: { return 2 },
+            onCodex: { _ in order.append("codex"); c.fulfill() },
+            onGemini: { _ in order.append("gemini"); g.fulfill() },
+            onAllDone: { order.append("done"); d.fulfill() })
+        wait(for: [g, c, d], timeout: 3, enforceOrder: true)
+        XCTAssertEqual(order, ["gemini", "codex", "done"])
+    }
+
+    func testCodexReadsOnlyAuthJSON() {
+        let paths = CodexCredential.readPaths(env: ["CODEX_HOME": "/tmp/codex-home"])
+        XCTAssertEqual(paths.map { $0.path }, ["/tmp/codex-home/auth.json"])
+        XCTAssertFalse(paths.contains { $0.path.contains("sessions") })
+    }
+}

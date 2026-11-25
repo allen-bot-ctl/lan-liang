@@ -43,6 +43,12 @@ public enum CodexCredential: Equatable {
         return .none
     }
 
+    /// 栏量在 Codex 目录下读取的全部路径：只有 auth.json（契约 0.1.5 §5，不再读 sessions）。
+    public static func readPaths(env: [String: String] = ProcessInfo.processInfo.environment) -> [URL] { [authFile(env: env)] }
+    public static func authFile(env: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        home(env: env).appendingPathComponent("auth.json")
+    }
+
     /// `CODEX_HOME` 优先，否则 `~/.codex`。
     public static func home(env: [String: String] = ProcessInfo.processInfo.environment) -> URL {
         if let h = env["CODEX_HOME"], !h.isEmpty { return URL(fileURLWithPath: h) }
@@ -115,32 +121,6 @@ public enum CodexProfile {
             out[day, default: 0] += Int64(t)
         }
         return out
-    }
-}
-
-/// 本机会话日志：只累加 token_count 事件的 last_token_usage。
-public enum CodexSessionLog {
-    /// 解析一行；不是 token_count 或坏行返回 nil。
-    public static func parseLine(_ line: Substring) -> (date: Date, tokens: Int64)? {
-        guard line.contains("token_count"),
-              let obj = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
-              obj["type"] as? String == "event_msg",
-              let payload = obj["payload"] as? [String: Any],
-              payload["type"] as? String == "token_count",
-              let info = payload["info"] as? [String: Any],
-              let last = info["last_token_usage"] as? [String: Any],
-              let date = parseFlexibleDate(obj["timestamp"]) else { return nil }
-        let total = looseDouble(last["total_tokens"])
-            ?? ((looseDouble(last["input_tokens"]) ?? 0) + (looseDouble(last["output_tokens"]) ?? 0))
-        guard total > 0 else { return nil }
-        return (date, Int64(total))
-    }
-
-    /// 把一个文件内容按本地日期累加到 daily。
-    public static func accumulate(_ text: String, into daily: inout [String: Int64], calendar: Calendar) {
-        for line in text.split(separator: "\n") {
-            if let (d, t) = parseLine(line) { daily[DayKey.of(d, calendar: calendar), default: 0] += t }
-        }
     }
 }
 

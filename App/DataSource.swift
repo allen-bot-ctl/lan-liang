@@ -1,18 +1,22 @@
 import Foundation
 import Security
 
-struct RefreshResult {
-    var codex: ServiceSnapshot
-    var gemini: ServiceSnapshot
-    var official: [String: Int64]?
-    var local: [String: Int64]
-    var now: Date?
+/// 一次刷新的回调：各自到了就各自调用，都在主线程（契约 0.1.5 §5）。
+struct RefreshHandlers {
+    /// Codex 额度（wham/usage 一回来就调用，不等用量图）。
+    var onCodex: (ServiceSnapshot) -> Void
+    /// Codex 官方每日用量；nil = 拉取失败。
+    var onCodexOfficial: ([String: Int64]?) -> Void
+    var onGemini: (ServiceSnapshot) -> Void
+    /// 两家额度都回来后调用一次。
+    var onAllDone: () -> Void
 }
 
 /// 数据来源：真实（读本机登录 + 调接口）或模拟（LANLIANG_FAKE / --debug-fake）。
 protocol DataSource: AnyObject {
-    func refresh(current: (ServiceSnapshot, ServiceSnapshot), completion: @escaping (RefreshResult) -> Void)
-    func loadSync(into model: PanelModel)
+    /// 模拟数据里固定的「现在」；真实数据为 nil。
+    var fixedNow: Date? { get }
+    func refresh(current: (ServiceSnapshot, ServiceSnapshot), handlers: RefreshHandlers)
     func allowKeychainAgain()
     /// Gemini 本机 Token 历史：后台串行扫描，结果回主线程；扫描还在跑时不再新起。
     func refreshGeminiHistory(completion: @escaping (GeminiHistory) -> Void)
@@ -31,24 +35,24 @@ final class FakeSource: DataSource {
     let path: String
     init(path: String) { self.path = path }
 
-    private func load() -> RefreshResult {
+    private func load() -> FakeData? {
         guard let d = FileManager.default.contents(atPath: path), let f = try? FakeData.decode(d) else {
             print("DEBUG_FAKE error path=\(path)")
-            return RefreshResult(codex: .init(status: .fetchFailed), gemini: .init(status: .fetchFailed),
-                                 official: nil, local: [:], now: nil)
+            return nil
         }
-        return RefreshResult(codex: f.codex, gemini: f.gemini, official: f.official, local: f.local, now: f.now)
+        return f
     }
 
-    func refresh(current: (ServiceSnapshot, ServiceSnapshot), completion: @escaping (RefreshResult) -> Void) {
-        let r = load()
-        DispatchQueue.main.async { completion(r) }
-    }
+    var fixedNow: Date? { load()?.now }
 
-    func loadSync(into model: PanelModel) {
-        let r = load()
-        model.codex = r.codex; model.gemini = r.gemini; model.official = r.official; model.local = r.local
-        if let n = r.now { model.now = { n } }
+    func refresh(current: (ServiceSnapshot, ServiceSnapshot), handlers h: RefreshHandlers) {
+        let f = load()
+        DispatchQueue.main.async {
+            h.onCodex(f?.codex ?? .init(status: .fetchFailed))
+            h.onGemini(f?.gemini ?? .init(status: .fetchFailed))
+            h.onCodexOfficial(f?.official)
+            h.onAllDone()
+        }
     }
 
     func allowKeychainAgain() {}
@@ -80,17 +84,19 @@ final class LiveSource: DataSource {
     private let codex = CodexLive()
     private let gemini = GeminiLive()
 
-    func refresh(current: (ServiceSnapshot, ServiceSnapshot), completion: @escaping (RefreshResult) -> Void) {
-        Task.detached {
-            async let c = self.codex.fetch(previous: current.0)
-            async let g = self.gemini.fetch(previous: current.1)
-            let (cr, gr) = await (c, g)
-            let r = RefreshResult(codex: cr.snapshot, gemini: gr, official: cr.official, local: cr.local, now: nil)
-            await MainActor.run { completion(r) }
-        }
+    var fixedNow: Date? { nil }
+
+    /// 两家额度各自请求、各自显示；Codex 官方用量在额度之后再拉，不拖慢额度。
+    func refresh(current: (ServiceSnapshot, ServiceSnapshot), handlers h: RefreshHandlers) {
+        let codex = self.codex, gemini = self.gemini
+        RefreshCoordinator.run(
+            codex: { await codex.fetch(previous: current.0, onQuota: { s in DispatchQueue.main.async { h.onCodex(s) } }) },
+            gemini: { await gemini.fetch(previous: current.1) },
+            onCodex: { official in h.onCodexOfficial(official) },
+            onGemini: { s in h.onGemini(s) },
+            onAllDone: { h.onAllDone() })
     }
 
-    func loadSync(into model: PanelModel) {}
     func allowKeychainAgain() { gemini.allowKeychainAgain() }
 
     /// 扫描受 QoS 影响很大（老板 Mac：后台 QoS 下 SQLite 读取 20.9 秒，正常 1.5 秒），用 userInitiated。
@@ -128,22 +134,17 @@ final class LiveSource: DataSource {
 // MARK: Codex
 
 final class CodexLive {
-    private var scanCache: [String: (mtime: Date, daily: [String: Int64])] = [:]
-    private let lock = NSLock()
-
-    struct Output { var snapshot: ServiceSnapshot; var official: [String: Int64]?; var local: [String: Int64] }
-
-    func fetch(previous: ServiceSnapshot) async -> Output {
-        let home = CodexCredential.home()
-        let local = scanLocal(home: home)
-        guard let data = FileManager.default.contents(atPath: home.appendingPathComponent("auth.json").path) else {
-            return Output(snapshot: .init(status: .notLoggedIn), official: nil, local: local)
+    /// 只读 ~/.codex/auth.json 取登录（不读 ~/.codex 下其他任何东西）。
+    /// 额度一回来就通过 onQuota 交出去；返回值是之后拉到的官方每日用量（nil = 失败或没登录）。
+    func fetch(previous: ServiceSnapshot, onQuota: (ServiceSnapshot) -> Void) async -> [String: Int64]? {
+        guard let data = FileManager.default.contents(atPath: CodexCredential.authFile().path) else {
+            onQuota(.init(status: .notLoggedIn)); return nil
         }
         switch CodexCredential.parse(data) {
         case .none:
-            return Output(snapshot: .init(status: .notLoggedIn), official: nil, local: local)
+            onQuota(.init(status: .notLoggedIn)); return nil
         case .apiKey:
-            return Output(snapshot: .init(status: .apiKeyOnly), official: nil, local: local)
+            onQuota(.init(status: .apiKeyOnly)); return nil
         case let .oauth(access, idToken, accountID):
             let acct = idToken.flatMap { CodexAccount.from(idToken: $0) }
             // 套餐先用 id_token 的，wham/usage 成功后换成实时 plan_type；日期缺失时用 access_token 的同名字段。
@@ -178,39 +179,10 @@ final class CodexLive {
             } catch {
                 snap.status = .fetchFailed
             }
-            var official: [String: Int64]?
-            if snap.status != .loginExpired, let d = try? await send(request("wham/profiles/me")) {
-                official = CodexProfile.parseDaily(d)
-            }
-            return Output(snapshot: snap, official: official, local: local)
+            onQuota(snap)
+            guard snap.status != .loginExpired, let d = try? await send(request("wham/profiles/me")) else { return nil }
+            return CodexProfile.parseDaily(d)
         }
-    }
-
-    /// 扫 sessions 与 archived_sessions 下的 .jsonl；文件修改时间没变就用缓存。
-    private func scanLocal(home: URL) -> [String: Int64] {
-        lock.lock(); defer { lock.unlock() }
-        let fm = FileManager.default
-        let cal = TokenSeries.calendar()
-        var seen = Set<String>()
-        for folder in ["sessions", "archived_sessions"] {
-            let root = home.appendingPathComponent(folder)
-            guard let en = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]) else { continue }
-            for case let url as URL in en where url.pathExtension == "jsonl" {
-                let path = url.path
-                seen.insert(path)
-                let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                if let c = scanCache[path], c.mtime == mtime { continue }
-                var daily: [String: Int64] = [:]
-                if let text = try? String(contentsOf: url, encoding: .utf8) {
-                    CodexSessionLog.accumulate(text, into: &daily, calendar: cal)
-                }
-                scanCache[path] = (mtime, daily)
-            }
-        }
-        scanCache = scanCache.filter { seen.contains($0.key) }
-        var total: [String: Int64] = [:]
-        for (_, c) in scanCache { for (k, v) in c.daily { total[k, default: 0] += v } }
-        return total
     }
 }
 

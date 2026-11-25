@@ -5,8 +5,9 @@ final class PanelModel: ObservableObject {
     @Published var tab: Service = .codex
     @Published var codex = ServiceSnapshot(status: .loading)
     @Published var gemini = ServiceSnapshot(status: .loading)
+    /// Codex 官方每日用量；nil = 还没回来或拉取失败（看 officialLoaded）。
     @Published var official: [String: Int64]? = nil
-    @Published var local: [String: Int64] = [:]
+    @Published var officialLoaded = false
     @Published var range: TokenRange = .daily
     /// Gemini 本机 Token 历史；nil = 首次扫描没完成。
     @Published var geminiHistory: GeminiHistory? = nil
@@ -138,12 +139,11 @@ struct TokenChartSection: View {
     let service: Service
     @State private var hover: String?
 
-    /// Codex：官方 + 本机；Gemini：只有本机（Antigravity 对话库）。
-    var official: [String: Int64]? { service == .codex ? model.official : nil }
-    var local: [String: Int64] { service == .codex ? model.local : (model.geminiHistory?.daily ?? [:]) }
+    /// Codex：只画官方数据；Gemini：只有本机（Antigravity 对话库）。
+    var series: [String: Int64] { service == .codex ? (model.official ?? [:]) : (model.geminiHistory?.daily ?? [:]) }
 
     var bars: [TokenBar] {
-        TokenSeries.bars(range: model.range, official: official, local: local,
+        TokenSeries.bars(range: model.range, official: nil, local: series,
                          now: model.now(), calendar: TokenSeries.calendar())
     }
 
@@ -153,7 +153,7 @@ struct TokenChartSection: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: service == .codex ? nil : 4) {
                 Text("Token 用量").font(.system(size: 14, weight: .semibold)).lineLimit(1).fixedSize()
-                if official == nil { Text("仅本机").font(.system(size: 11)).foregroundColor(.secondary).lineLimit(1).fixedSize() }
+                if service == .gemini { Text("仅本机").font(.system(size: 11)).foregroundColor(.secondary).lineLimit(1).fixedSize() }
                 if failedCount > 0 {
                     Text("· \(failedCount) 个对话读取失败").font(.system(size: 11)).foregroundColor(.secondary)
                         .lineLimit(1).fixedSize()
@@ -164,12 +164,11 @@ struct TokenChartSection: View {
                 }
                 .pickerStyle(.segmented).labelsHidden().frame(width: failedCount > 0 ? 108 : 150)
             }
-            if let st = geminiStatus {
+            if let st = status {
                 Text(st.text).font(.system(size: 12)).foregroundColor(st.isError ? .red : .secondary)
                     .frame(maxWidth: .infinity, minHeight: 150, maxHeight: 150, alignment: .center)
             } else {
-                BarChart(bars: bars, active: active, axisKeys: Set(axisKeys(bars)), axisLabel: axisLabel,
-                         detailed: service == .codex, hover: $hover)
+                BarChart(bars: bars, active: active, axisKeys: Set(axisKeys(bars)), axisLabel: axisLabel, hover: $hover)
                 .frame(height: 150)
             }
         }
@@ -181,9 +180,12 @@ struct TokenChartSection: View {
         return failed
     }
 
-    /// Gemini 图区的状态文案（契约 0.1.4 §4）；nil = 画图。
-    var geminiStatus: (text: String, isError: Bool)? {
-        guard service == .gemini else { return nil }
+    /// 图区的状态文案（契约 0.1.4 §4、0.1.5 §5）；nil = 画图。
+    var status: (text: String, isError: Bool)? {
+        if service == .codex {
+            if !model.officialLoaded { return ("正在统计…", false) }
+            return model.official == nil ? ("官方用量暂时拿不到", false) : nil
+        }
         guard let h = model.geminiHistory else { return ("正在统计…", false) }
         let d = h.display
         guard let msg = GeminiHistory.message(d) else { return nil }
@@ -207,17 +209,11 @@ struct TokenChartSection: View {
 
 struct TooltipView: View {
     let bar: TokenBar
-    /// false：只显示日期和总数（Gemini 没有官方统计）。
-    var detailed = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(bar.label)
             Text("\(Fmt.tokens(bar.value)) Tokens").fontWeight(.semibold)
-            if detailed {
-                Text("官方统计（多端） \(Fmt.tokens(bar.official))")
-                Text("本机 \(Fmt.tokens(bar.local))")
-            }
         }
         .font(.system(size: 11))
         .padding(8)
@@ -233,7 +229,6 @@ struct BarChart: View {
     let active: String?
     let axisKeys: Set<String>
     let axisLabel: (String) -> String
-    var detailed = true
     @Binding var hover: String?
 
     private let axisWidth: CGFloat = 44
@@ -279,7 +274,7 @@ struct BarChart: View {
                         }
                     }
                 if let k = active, let i = bars.firstIndex(where: { $0.key == k }) {
-                    TooltipView(bar: bars[i], detailed: detailed)
+                    TooltipView(bar: bars[i])
                         .fixedSize()
                         .position(x: min(max(axisWidth + slot * (CGFloat(i) + 0.5), 90), geo.size.width - 90), y: 36)
                         .allowsHitTesting(false)
