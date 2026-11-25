@@ -29,7 +29,9 @@ shoot() {  # $1=后缀  其余=启动参数
   local log="/tmp/shots-$tag.log"
   "$bin" "$@" >"$log" 2>&1 &
   local pid=$!
-  sleep 5
+  local w=0  # 最多等 15 秒，区域一出现就截
+  while [ $w -lt 15 ]; do sleep 1; w=$((w+1)); grep -q "^DEBUG_RECT_PANEL" "$log" && break; done
+  sleep 1
   cat "$log"
   local mb it pn
   mb=$(awk '/^DEBUG_RECT_MENUBAR/{print $2}' "$log")
