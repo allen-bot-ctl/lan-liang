@@ -52,7 +52,7 @@ final class FakeSource: DataSource {
     func allowKeychainAgain() {}
 }
 
-// MARK: - 真实数据（只读：不写 ~/.codex、~/.gemini、钥匙串）
+// MARK: - 真实数据（只读 ~/.codex、~/.gemini、钥匙串；只写自己的 ~/.lanliang）
 
 enum HTTPFailure: Error { case unauthorized, failed }
 
@@ -186,52 +186,30 @@ enum AntigravityOAuth {
 }
 
 final class GeminiLive {
-    private let keychainQueue = DispatchQueue(label: "lanliang.keychain")
-    private var keychainDenied = false
-    private var keychainBusy = false
-    /// 内存里换新的令牌（按 refresh_token 区分），不写回任何地方。
-    private var refreshed: (refreshToken: String, access: String, expiry: Date)?
-    private let lock = NSLock()
+    /// 登录来源与换新都在 GeminiTokenProvider（LanLiangCore）：钥匙串只读，换新结果只写 ~/.lanliang 缓存。
+    private let provider = GeminiTokenProvider(
+        home: FileManager.default.homeDirectoryForCurrentUser,
+        keychain: GeminiLive.readKeychain,
+        clientID: AntigravityOAuth.clientID, clientSecret: AntigravityOAuth.clientSecret,
+        transport: { req in
+            let (d, resp) = try await URLSession.shared.data(for: req)
+            return (d, (resp as? HTTPURLResponse)?.statusCode ?? 0)
+        })
 
-    func allowKeychainAgain() { locked { keychainDenied = false } }
+    func allowKeychainAgain() { provider.allowKeychainAgain() }
 
-    /// 同步加锁小工具：async 函数里不能直接调 NSLock.lock()，经由同步函数调用即可。
-    private func locked<T>(_ body: () -> T) -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return body()
-    }
-
-    private enum CredResult { case found(GeminiCredential), none, denied, busy }
-
-    private func readCredential() -> CredResult {
-        for f in GeminiCredential.candidateFiles() {
-            if let d = FileManager.default.contents(atPath: f.path), let c = GeminiCredential.parse(d) { return .found(c) }
-        }
-        lock.lock()
-        if keychainDenied { lock.unlock(); return .denied }
-        if keychainBusy { lock.unlock(); return .busy }
-        keychainBusy = true
-        lock.unlock()
-        defer { lock.lock(); keychainBusy = false; lock.unlock() }
-        return keychainQueue.sync { () -> CredResult in
-            let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: "gemini",
-                                    kSecAttrAccount as String: "antigravity",
-                                    kSecReturnData as String: true,
-                                    kSecMatchLimit as String: kSecMatchLimitOne]
-            var out: CFTypeRef?
-            let st = SecItemCopyMatching(q as CFDictionary, &out)
-            switch st {
-            case errSecSuccess:
-                if let d = out as? Data, let c = GeminiCredential.parse(d) { return .found(c) }
-                return .none
-            case errSecItemNotFound:
-                return .none
-            default:
-                lock.lock(); keychainDenied = true; lock.unlock()
-                return .denied
-            }
+    /// 只读 Antigravity 存的钥匙串项（gemini / antigravity）；栏量从不写钥匙串。
+    private static func readKeychain() -> GeminiTokenProvider.KeychainRead {
+        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                kSecAttrService as String: "gemini",
+                                kSecAttrAccount as String: "antigravity",
+                                kSecReturnData as String: true,
+                                kSecMatchLimit as String: kSecMatchLimitOne]
+        var out: CFTypeRef?
+        switch SecItemCopyMatching(q as CFDictionary, &out) {
+        case errSecSuccess: return (out as? Data).map { .found($0) } ?? .notFound
+        case errSecItemNotFound: return .notFound
+        default: return .denied
         }
     }
 
@@ -247,26 +225,6 @@ final class GeminiLive {
         #else
         return "x64"
         #endif
-    }
-
-    /// 取可用的访问令牌：没过期用文件/钥匙串里的；过期或 force（接口 401）时用 refresh_token 在内存里换新。
-    private func accessToken(_ c: GeminiCredential, force: Bool = false) async throws -> String {
-        if !force, !c.isExpired(now: Date()) { return c.accessToken }
-        guard let rt = c.refreshToken, !rt.isEmpty else { throw HTTPFailure.unauthorized }
-        let cached = locked { refreshed }
-        if !force, let r = cached, r.refreshToken == rt, r.expiry.timeIntervalSinceNow > 60 { return r.access }
-        do {
-            let r = try await GeminiTokenRefresh.refresh(
-                refreshToken: rt, clientID: AntigravityOAuth.clientID, clientSecret: AntigravityOAuth.clientSecret,
-                now: Date()) { req in
-                    let (d, resp) = try await URLSession.shared.data(for: req)
-                    return (d, (resp as? HTTPURLResponse)?.statusCode ?? 0)
-                }
-            locked { refreshed = (rt, r.accessToken, r.expiry) }
-            return r.accessToken
-        } catch {
-            throw HTTPFailure.unauthorized
-        }
     }
 
     private func post(_ method: String, token: String, ua: String, body: [String: Any]) async throws -> Data {
@@ -309,24 +267,25 @@ final class GeminiLive {
     }
 
     func fetch(previous: ServiceSnapshot) async -> ServiceSnapshot {
-        let cred: GeminiCredential
-        switch readCredential() {
-        case .found(let c): cred = c
+        let cred: GeminiCredential, source: GeminiTokenProvider.Source
+        switch provider.load() {
+        case let .found(c, s): cred = c; source = s
         case .none: return .init(status: .notLoggedIn)
         case .denied: return .init(status: .keychainDenied)
-        case .busy: return previous
         }
         var snap = previous
         snap.status = .ok
         if let id = cred.idToken, let email = JWT.payload(id)?["email"] as? String { snap.email = email }
         do {
             do {
-                try await query(token: try await accessToken(cred), into: &snap)
+                try await query(token: try await provider.accessToken(cred, source: source), into: &snap)
             } catch HTTPFailure.unauthorized {
-                // 接口 401：在内存里换新令牌后重试一次；换新失败才算登录过期
-                try await query(token: try await accessToken(cred, force: true), into: &snap)
+                // 接口 401：换新令牌后重试一次；换新被拒才算登录过期
+                try await query(token: try await provider.accessToken(cred, source: source, force: true), into: &snap)
             }
         } catch HTTPFailure.unauthorized {
+            snap.status = .loginExpired
+        } catch GeminiTokenProvider.TokenError.expired {
             snap.status = .loginExpired
         } catch {
             snap.status = .fetchFailed

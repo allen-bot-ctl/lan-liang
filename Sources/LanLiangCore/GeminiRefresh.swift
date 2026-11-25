@@ -3,12 +3,15 @@ import Foundation
 import FoundationNetworking
 #endif
 
-/// 用 refresh_token 换新 Gemini（Antigravity）访问令牌：只在内存里用，不写回任何地方。
+/// 用 refresh_token 换新 Gemini（Antigravity）访问令牌。不写 ~/.gemini、不写钥匙串；
+/// 令牌来自栏量自己的缓存（~/.lanliang/gemini-token.json）时由 GeminiTokenProvider 写回缓存。
 public enum GeminiTokenRefresh {
     /// 发请求的方式（测试里换成假的）：返回响应体和 HTTP 状态码。
     public typealias Transport = (URLRequest) async throws -> (Data, Int)
 
     public struct Failed: Error, Equatable {}
+    /// 令牌接口明确拒绝（400/401，例如 invalid_grant）：refresh_token 已失效。
+    public struct Rejected: Error, Equatable {}
 
     public static func request(refreshToken: String, clientID: String, clientSecret: String) -> URLRequest {
         var req = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
@@ -40,6 +43,7 @@ public enum GeminiTokenRefresh {
         let req = request(refreshToken: refreshToken, clientID: clientID, clientSecret: clientSecret)
         let (data, code): (Data, Int)
         do { (data, code) = try await transport(req) } catch { throw Failed() }
+        if code == 400 || code == 401 { throw Rejected() }
         guard (200..<300).contains(code), let r = parse(data, now: now) else { throw Failed() }
         return r
     }

@@ -1,5 +1,6 @@
 #if canImport(AppKit)
 import AppKit
+import CoreText
 
 /// 唯一一个菜单栏状态项的内容图（契约 0.1.2 §2，方案 B）。
 /// 整张图是模板图：周剩余不透明（显示成 labelColor），5 小时剩余半透明（显示成浅色），
@@ -52,6 +53,14 @@ public enum MenuBarLayout {
         return c.icon + st.gapAfterIcon + c.primary + (c.secondary > 0 ? st.gapBeforeSecondary + c.secondary : 0)
     }
 
+    /// 某一行文字的基线 y（非翻转坐标）：周剩余和 5 小时共用；给单测核对对齐用。
+    public static func baseline(rowIndex i: Int, rowCount: Int, height: CGFloat) -> CGFloat {
+        let st = style(rowCount: rowCount)
+        let pitch: CGFloat = rowCount == 2 ? 10.5 : 0
+        let cy = height / 2 + (rowCount == 2 ? (i == 0 ? pitch / 2 : -pitch / 2) : 0)
+        return (cy - st.primaryFont.capHeight / 2).rounded()
+    }
+
     public static func iconName(_ s: Service) -> String { s == .codex ? "terminal" : "sparkle" }
 
     /// 画出内容图；height 用菜单栏高度（NSStatusBar.system.thickness）。
@@ -72,13 +81,21 @@ public enum MenuBarLayout {
                     let r = NSRect(x: (c.icon - s.width) / 2, y: cy - s.height / 2, width: s.width, height: s.height)
                     sym.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1)
                 }
+                // 同一行的周剩余和 5 小时数字共用一条基线（按周剩余字体让数字视觉居中，契约 0.1.3 §3）。
+                let base = MenuBarLayout.baseline(rowIndex: i, rowCount: rows.count, height: height)
                 func draw(_ text: String, font: NSFont, right: CGFloat, alpha: CGFloat) {
+                    guard let ctx = NSGraphicsContext.current?.cgContext else { return }
                     let a = NSAttributedString(string: text, attributes: [
-                        .font: font, .foregroundColor: NSColor.black.withAlphaComponent(alpha)])
-                    let tw = a.size().width
-                    // 数字视觉中心（基线 + 大写高度一半）对准行中心。
-                    let baseline = cy - font.capHeight / 2
-                    a.draw(at: NSPoint(x: right - tw, y: baseline + font.descender))
+                        .font: font, NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true])
+                    let line = CTLineCreateWithAttributedString(a)
+                    let tw = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+                    // CoreText 按给定基线画，周剩余和 5 小时数字基线完全一致。
+                    ctx.saveGState()
+                    ctx.setFillColor(NSColor.black.withAlphaComponent(alpha).cgColor)
+                    ctx.textMatrix = .identity
+                    ctx.textPosition = CGPoint(x: right - tw, y: base)
+                    CTLineDraw(line, ctx)
+                    ctx.restoreGState()
                 }
                 let pRight = c.icon + st.gapAfterIcon + c.primary
                 draw(row.primary, font: st.primaryFont, right: pRight, alpha: 1)

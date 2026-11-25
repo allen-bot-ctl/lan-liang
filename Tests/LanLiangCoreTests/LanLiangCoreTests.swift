@@ -231,7 +231,8 @@ final class GeminiRefreshTests: XCTestCase {
                 }
                 XCTFail("应失败: \(code)")
             } catch {
-                XCTAssertEqual(error as? GeminiTokenRefresh.Failed, GeminiTokenRefresh.Failed())
+                if code == 400 { XCTAssertEqual(error as? GeminiTokenRefresh.Rejected, GeminiTokenRefresh.Rejected()) }
+                else { XCTAssertEqual(error as? GeminiTokenRefresh.Failed, GeminiTokenRefresh.Failed()) }
             }
         }
         // 没有 client secret 或 refresh_token 时不发请求
@@ -416,3 +417,168 @@ final class V012Tests: XCTestCase {
     }
     #endif
 }
+
+final class GeminiTokenCacheTests: XCTestCase {
+    var home: URL!
+    let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+
+    override func setUpWithError() throws {
+        home = FileManager.default.temporaryDirectory.appendingPathComponent("lanliang-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    }
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: home) }
+
+    func cred(_ at: String, rt: String?, expiry: Date?) -> GeminiCredential {
+        GeminiCredential(accessToken: at, refreshToken: rt, expiry: expiry, idToken: nil)
+    }
+    func keychainBlob(_ c: GeminiCredential) -> Data {
+        Data((GeminiCredential.keychainPrefix + c.fileData().base64EncodedString()).utf8)
+    }
+    func perms(_ u: URL) -> Int { ((try? FileManager.default.attributesOfItem(atPath: u.path))?[.posixPermissions] as? NSNumber)?.intValue ?? -1 }
+
+    final class Box<T> { var v: T; init(_ v: T) { self.v = v } }
+
+    func provider(keychain: Box<GeminiTokenProvider.KeychainRead>, calls: Box<[String]>,
+                  respond: @escaping (String) -> (String, Int)) -> GeminiTokenProvider {
+        GeminiTokenProvider(home: home, keychain: { keychain.v }, clientID: "cid", clientSecret: "sec",
+                            transport: { req in
+                                let body = String(data: req.httpBody ?? Data(), encoding: .utf8) ?? ""
+                                let rt = URLComponents(string: "?" + body)?.queryItems?.first { $0.name == "refresh_token" }?.value ?? ""
+                                calls.v.append(rt)
+                                let (b, c) = respond(rt)
+                                return (Data(b.utf8), c)
+                            }, now: { self.t0 })
+    }
+
+    func testFileDataRoundTrip() {
+        let c = GeminiCredential(accessToken: "a", refreshToken: "r", expiry: t0, idToken: "i")
+        XCTAssertEqual(GeminiCredential.parse(c.fileData()), c)
+        XCTAssertEqual(GeminiCredential.parse(keychainBlob(c)), c)
+    }
+
+    func testKeychainOnlyWritesCacheOnceThenNeverReadsKeychain() {
+        let kc = Box<GeminiTokenProvider.KeychainRead>(.found(keychainBlob(cred("kc-at", rt: "kc-rt", expiry: t0 + 3600))))
+        let p = provider(keychain: kc, calls: Box([]), respond: { _ in ("", 500) })
+        guard case let .found(c, src) = p.load() else { return XCTFail("应读到") }
+        XCTAssertEqual(c.accessToken, "kc-at"); XCTAssertEqual(src, .cache)
+        let f = GeminiTokenCache.file(home: home)
+        XCTAssertEqual(perms(f), 0o600)
+        XCTAssertEqual(perms(GeminiTokenCache.directory(home: home)), 0o700)
+        XCTAssertEqual(GeminiTokenCache.read(home: home)?.accessToken, "kc-at")
+        // 钥匙串项删掉或拒绝授权后，仍从缓存读到，且不再碰钥匙串。
+        kc.v = .denied
+        guard case .found(_, .cache) = p.load() else { return XCTFail("应从缓存读到") }
+        let p2 = provider(keychain: kc, calls: Box([]), respond: { _ in ("", 500) })
+        guard case .found(_, .cache) = p2.load() else { return XCTFail("重启后应从缓存读到") }
+        XCTAssertEqual(p.keychainReads, 1); XCTAssertEqual(p2.keychainReads, 0)
+        // 没有残留临时文件
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: GeminiTokenCache.directory(home: home).path)) ?? []
+        XCTAssertEqual(names, ["gemini-token.json"])
+    }
+
+    func testAntigravityFileWinsAndIsNeverWritten() async throws {
+        let g = home.appendingPathComponent(".gemini")
+        try FileManager.default.createDirectory(at: g, withIntermediateDirectories: true)
+        let fileURL = g.appendingPathComponent("jetski-standalone-oauth-token")
+        let original = cred("file-at", rt: "file-rt", expiry: t0 - 10).fileData()
+        try original.write(to: fileURL)
+        let kc = Box<GeminiTokenProvider.KeychainRead>(.found(keychainBlob(cred("kc-at", rt: "kc-rt", expiry: nil))))
+        let p = provider(keychain: kc, calls: Box([]), respond: { _ in (#"{"access_token":"new","expires_in":3600}"#, 200) })
+        guard case let .found(c, src) = p.load() else { return XCTFail() }
+        XCTAssertEqual(src, .antigravityFile)
+        let at = try await p.accessToken(c, source: src)
+        XCTAssertEqual(at, "new")
+        XCTAssertEqual(try Data(contentsOf: fileURL), original)       // 不写 ~/.gemini
+        XCTAssertNil(GeminiTokenCache.read(home: home))               // 不写缓存
+        XCTAssertEqual(p.keychainReads, 0)
+    }
+
+    func testExpiredCacheRefreshesAndWritesBack() async throws {
+        try GeminiTokenCache.write(cred("old-at", rt: "good-rt", expiry: t0 - 10), home: home)
+        let kc = Box<GeminiTokenProvider.KeychainRead>(.denied)
+        let calls = Box<[String]>([])
+        let p = provider(keychain: kc, calls: calls, respond: { _ in (#"{"access_token":"fresh-at","expires_in":3599}"#, 200) })
+        guard case let .found(c, src) = p.load() else { return XCTFail() }
+        let at = try await p.accessToken(c, source: src)
+        XCTAssertEqual(at, "fresh-at")
+        XCTAssertEqual(calls.v, ["good-rt"])
+        let saved = GeminiTokenCache.read(home: home)
+        XCTAssertEqual(saved?.accessToken, "fresh-at")
+        XCTAssertEqual(saved?.refreshToken, "good-rt")
+        XCTAssertEqual(saved?.expiry, t0 + 3599)
+        XCTAssertEqual(perms(GeminiTokenCache.file(home: home)), 0o600)
+        XCTAssertEqual(p.keychainReads, 0)   // 不弹钥匙串框
+    }
+
+    func testBrokenCacheRefreshRereadsKeychainOnceAndRecovers() async throws {
+        try GeminiTokenCache.write(cred("old-at", rt: "broken-rt", expiry: t0 - 10), home: home)
+        let kc = Box<GeminiTokenProvider.KeychainRead>(.found(keychainBlob(cred("kc-at", rt: "kc-rt", expiry: t0 - 10))))
+        let calls = Box<[String]>([])
+        let p = provider(keychain: kc, calls: calls, respond: { rt in
+            rt == "kc-rt" ? (#"{"access_token":"recovered","expires_in":3600}"#, 200) : (#"{"error":"invalid_grant"}"#, 400)
+        })
+        guard case let .found(c, src) = p.load() else { return XCTFail() }
+        let at = try await p.accessToken(c, source: src)
+        XCTAssertEqual(at, "recovered")
+        XCTAssertEqual(calls.v, ["broken-rt", "kc-rt"])
+        XCTAssertEqual(p.keychainReads, 1)
+        XCTAssertEqual(GeminiTokenCache.read(home: home)?.refreshToken, "kc-rt")
+        XCTAssertEqual(GeminiTokenCache.read(home: home)?.accessToken, "recovered")
+    }
+
+    func testBrokenCacheAndNoKeychainIsExpiredAndKeychainReadOnlyOnce() async throws {
+        try GeminiTokenCache.write(cred("old-at", rt: "broken-rt", expiry: t0 - 10), home: home)
+        let kc = Box<GeminiTokenProvider.KeychainRead>(.notFound)
+        let p = provider(keychain: kc, calls: Box([]), respond: { _ in (#"{"error":"invalid_grant"}"#, 400) })
+        guard case let .found(c, src) = p.load() else { return XCTFail() }
+        for _ in 0..<3 {
+            do { _ = try await p.accessToken(c, source: src); XCTFail("应过期") }
+            catch { XCTAssertEqual(error as? GeminiTokenProvider.TokenError, .expired) }
+        }
+        XCTAssertEqual(p.keychainReads, 1)   // 本次运行不再反复读钥匙串
+        // 文案
+        XCTAssertEqual(ServiceSnapshot(status: .loginExpired).message(for: .gemini), "Gemini 登录已过期，打开一次 Antigravity 后再刷新")
+    }
+
+    func testSameKeychainContentDoesNotRetry() async throws {
+        let same = cred("old-at", rt: "broken-rt", expiry: t0 - 10)
+        try GeminiTokenCache.write(same, home: home)
+        let kc = Box<GeminiTokenProvider.KeychainRead>(.found(keychainBlob(same)))
+        let calls = Box<[String]>([])
+        let p = provider(keychain: kc, calls: calls, respond: { _ in (#"{"error":"invalid_grant"}"#, 400) })
+        guard case let .found(c, src) = p.load() else { return XCTFail() }
+        do { _ = try await p.accessToken(c, source: src); XCTFail() } catch {}
+        XCTAssertEqual(calls.v, ["broken-rt"])
+    }
+
+    func testNetworkFailureIsNotExpiredAndDoesNotTouchKeychain() async throws {
+        try GeminiTokenCache.write(cred("old-at", rt: "rt", expiry: t0 - 10), home: home)
+        let p = provider(keychain: Box(.notFound), calls: Box([]), respond: { _ in ("oops", 503) })
+        guard case let .found(c, src) = p.load() else { return XCTFail() }
+        do { _ = try await p.accessToken(c, source: src); XCTFail() }
+        catch { XCTAssertEqual(error as? GeminiTokenProvider.TokenError, .failed) }
+        XCTAssertEqual(p.keychainReads, 0)
+        XCTAssertEqual(GeminiTokenCache.read(home: home)?.accessToken, "old-at")
+    }
+
+    func testNothingAnywhere() {
+        XCTAssertEqual(provider(keychain: Box(.notFound), calls: Box([]), respond: { _ in ("", 500) }).load(), .none)
+        XCTAssertEqual(provider(keychain: Box(.denied), calls: Box([]), respond: { _ in ("", 500) }).load(), .denied)
+        XCTAssertNil(GeminiTokenCache.read(home: home))
+    }
+}
+
+#if canImport(AppKit)
+final class MenuBarBaselineTests: XCTestCase {
+    func testBothNumbersShareRowBaseline() {
+        // 两行：各行基线是整数点，上行高于下行，且都在 22pt 内。
+        let b0 = MenuBarLayout.baseline(rowIndex: 0, rowCount: 2, height: 22)
+        let b1 = MenuBarLayout.baseline(rowIndex: 1, rowCount: 2, height: 22)
+        XCTAssertEqual(b0, b0.rounded()); XCTAssertEqual(b1, b1.rounded())
+        XCTAssertGreaterThan(b0, b1)
+        XCTAssertGreaterThanOrEqual(b1, 1)
+        XCTAssertLessThanOrEqual(b0 + MenuBarLayout.compact.primaryFont.capHeight, 22)
+    }
+}
+#endif
+

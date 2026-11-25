@@ -78,8 +78,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: 菜单栏
 
+    /// 状态项固定的自动保存名；不用系统默认的 Item-0（旧版本留下的 Item-0 隐藏偏好会被继承，契约 0.1.3 §1）。
+    static let statusItemAutosaveName = "lanliang.main"
+
+    /// 删掉 0.1.0–0.1.2 系统自动命名留下的显示/位置偏好。
+    private func clearStaleStatusItemDefaults() {
+        let d = UserDefaults.standard
+        for i in 0...2 {
+            d.removeObject(forKey: "NSStatusItem Visible Item-\(i)")
+            d.removeObject(forKey: "NSStatusItem Preferred Position Item-\(i)")
+        }
+    }
+
     private func makeItem() -> NSStatusItem {
+        clearStaleStatusItemDefaults()
         let it = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        it.autosaveName = Self.statusItemAutosaveName
+        it.isVisible = true
         statusItemCount += 1
         if let b = it.button {
             b.target = self
@@ -250,7 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let rs = rows
         let groups = rs.map { "\($0.service.rawValue):\($0.primary)\($0.secondary.map { "+" + $0 } ?? "")" }
         let content = String(format: "%.1f", MenuBarLayout.width(rs))
-        print("DEBUG_MENUBAR items=\(statusItemCount) rows=\(rs.count) content=\(content) item=\(Int(itemWidth)) groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ","))")
+        print("DEBUG_MENUBAR items=\(statusItemCount) visible=\(statusItem.isVisible ? 1 : 0) autosave=\(statusItem.autosaveName ?? "") rows=\(rs.count) content=\(content) item=\(Int(itemWidth)) groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ","))")
         fflush(stdout)
     }
 }

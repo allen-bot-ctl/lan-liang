@@ -71,6 +71,23 @@ for ap in dark light; do
       --debug-tab=$tab ${range:+--debug-range=$range} --debug-hover=auto
   done
 done
+# 带旧偏好升级（契约 0.1.3 §1）：预置旧版本留下的 Item-0 隐藏偏好（以及新名字也被藏），启动后状态项必须可见。
+for ap in dark light; do
+  if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
+  defaults write "$BUNDLE_ID" "NSStatusItem Visible Item-0" -bool false
+  defaults write "$BUNDLE_ID" "NSStatusItem Visible Item-1" -bool false
+  defaults write "$BUNDLE_ID" "NSStatusItem Preferred Position Item-0" -float 300
+  defaults write "$BUNDLE_ID" "NSStatusItem Visible lanliang.main" -bool false
+  LANLIANG_FAKE="$PWD/fixtures/normal.json" shoot "-stale-prefs-codex-daily-$ap" --debug-open-panel --debug-appearance=$ap \
+    --debug-tab=codex --debug-hover=auto
+  if defaults read "$BUNDLE_ID" "NSStatusItem Visible Item-0" >/dev/null 2>&1; then
+    echo "::error::启动后旧键 NSStatusItem Visible Item-0 还在"; exit 1
+  fi
+  l=$(grep -h "^DEBUG_MENUBAR" "/tmp/shots--stale-prefs-codex-daily-$ap.log" | tail -n 1)
+  echo "RELEASE: stale-prefs $ap: $l"
+  grep -q " visible=1 " <<<"$l" && grep -q " items=1 " <<<"$l" && grep -q " autosave=lanliang.main " <<<"$l" \
+    || { echo "::error::带旧偏好启动后状态项不可见: $l"; exit 1; }
+done
 # 菜单栏：唯一一个状态项、每行文字、内容宽度（契约 0.1.2 §2/§3）。
 mbline() { grep -h "^DEBUG_MENUBAR" "/tmp/shots--$1-$2.log" | tail -n 1; }
 field() { sed -E "s/.* $2=([^ ]+).*/\1/" <<<"$1"; }
@@ -79,6 +96,7 @@ chk() {
     l=$(mbline "$1" "$ap")
     [ -n "$l" ] || { echo "::error::$1-$ap 没有 DEBUG_MENUBAR"; exit 1; }
     [ "$(field "$l" items)" = 1 ] || { echo "::error::$1-$ap 状态项不是 1 个: $l"; exit 1; }
+    [ "$(field "$l" visible)" = 1 ] || { echo "::error::$1-$ap 状态项不可见: $l"; exit 1; }
     [ "$(field "$l" groups)" = "$2" ] || { echo "::error::$1-$ap 菜单栏行不对: $l（应为 $2）"; exit 1; }
     [ "$(field "$l" rows)" = "$3" ] || { echo "::error::$1-$ap 行数不对: $l（应为 $3）"; exit 1; }
   done
