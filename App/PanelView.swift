@@ -479,28 +479,35 @@ struct BarChart: View {
     @Binding var hover: String?
     @Environment(\.colorScheme) private var scheme
 
-    private let axisWidth: CGFloat = 40
+    /// 刻度列宽：按最宽的刻度文字量出来（「44.83亿」「8900万」不截断）。
+    static func axisWidth(_ labels: [String]) -> CGFloat {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        let w = labels.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        return max(28, ceil(w) + 8)
+    }
     private let labelHeight: CGFloat = 18
     private let topPad: CGFloat = 6
 
     var body: some View {
         let th = Theme(scheme)
         let maxV = max(bars.map { $0.value }.max() ?? 0, 1)
+        let ticks = [0.0, 0.5, 1.0].map { Fmt.axisTokens(Int64(Double(maxV) * $0)) }
+        let axisWidth = Self.axisWidth(ticks)
         GeometryReader { geo in
             let plotW = geo.size.width - axisWidth
             let plotH = geo.size.height - labelHeight - topPad
             let slot = plotW / CGFloat(max(bars.count, 1))
             ZStack(alignment: .topLeading) {
-                ForEach([0.0, 0.5, 1.0], id: \.self) { f in
+                ForEach(Array([0.0, 0.5, 1.0].enumerated()), id: \.offset) { idx, f in
                     let y = topPad + plotH * (1 - f)
                     if f < 1 {
                         Path { p in p.move(to: CGPoint(x: axisWidth, y: y)); p.addLine(to: CGPoint(x: geo.size.width, y: y)) }
                             .stroke(th.ink.opacity(f == 0 ? 0.18 : 0.10),
                                     style: StrokeStyle(lineWidth: 0.5, dash: f == 0 ? [] : [2, 3]))
                     }
-                    Text(Fmt.axisTokens(Int64(Double(maxV) * f)))
+                    Text(ticks[idx])
                         .font(.system(size: 10).monospacedDigit()).foregroundColor(th.ink.opacity(0.5))
-                        .lineLimit(1)
+                        .lineLimit(1).fixedSize()
                         .frame(width: axisWidth - 6, alignment: .trailing)
                         .position(x: (axisWidth - 6) / 2, y: y)
                 }

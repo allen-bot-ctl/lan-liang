@@ -84,6 +84,7 @@ for ap in dark light; do
     --debug-hover-button=refresh
   LANLIANG_FAKE="$PWD/fixtures/longest.json" shoot "-v020-longest-codex-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=codex
   LANLIANG_FAKE="$PWD/fixtures/longest.json" shoot "-v020-longest-gemini-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=gemini
+  LANLIANG_FAKE="$PWD/fixtures/widest-tick.json" shoot "-v020-widest-tick-codex-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=codex --debug-hover=auto
   LANLIANG_FAKE="$nf" shoot "-v020-settings-$ap" --debug-open-settings --debug-appearance=$ap --debug-update=0.2.1
 done
 # 带旧偏好升级（契约 0.1.3 §1）：预置旧版本留下的 Item-0 隐藏偏好（以及新名字也被藏），启动后状态项必须可见。
