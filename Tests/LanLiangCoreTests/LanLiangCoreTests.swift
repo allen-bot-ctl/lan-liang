@@ -992,6 +992,21 @@ final class GeminiDiskCacheTests: GeminiDBTestCase {
         XCTAssertEqual(names, ["gemini-usage-cache.json"])
     }
 
+    func testDebugTimingWritesTempCacheInSubfolder() throws {
+        makeSet()
+        try FileManager.default.removeItem(at: dir("antigravity-cli").appendingPathComponent("bad.db"))
+        let root = home.appendingPathComponent("tmp-root")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let x = GeminiScanTiming.run(home: home, tempRoot: root, calendar: utc)
+        XCTAssertTrue(x.cacheWritten)
+        XCTAssertEqual(x.failed, 0)
+        XCTAssertGreaterThan(x.firstOpened, 0)
+        XCTAssertEqual(x.cachedOpened, 0)
+        XCTAssertTrue(GeminiScanTiming.lines(x)[0].hasSuffix("cacheWritten=yes"))
+        XCTAssertTrue(GeminiScanTiming.lines(x)[1].hasSuffix("opened=0"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])   // 子目录已删
+    }
+
     func testBadCacheFilesMeanNoCache() throws {
         makeSet()
         let expected = GeminiHistoryScanner(home: home, calendar: utc).scan()
@@ -1083,5 +1098,30 @@ final class RefreshCoordinatorTests: XCTestCase {
         let paths = CodexCredential.readPaths(env: ["CODEX_HOME": "/tmp/codex-home"])
         XCTAssertEqual(paths.map { $0.path }, ["/tmp/codex-home/auth.json"])
         XCTAssertFalse(paths.contains { $0.path.contains("sessions") })
+    }
+}
+
+final class PanelTextTests: XCTestCase {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    func testUpdatedAgo() {
+        XCTAssertEqual(PanelText.updated(last: now.addingTimeInterval(-10), now: now, refreshing: false), "刚刚更新")
+        XCTAssertEqual(PanelText.updated(last: now.addingTimeInterval(-60), now: now, refreshing: false), "1 分钟前更新")
+        XCTAssertEqual(PanelText.updated(last: now.addingTimeInterval(-59 * 60 - 59), now: now, refreshing: false), "59 分钟前更新")
+        XCTAssertEqual(PanelText.updated(last: now.addingTimeInterval(-3_600), now: now, refreshing: false), "1 小时前更新")
+        XCTAssertEqual(PanelText.updated(last: now, now: now, refreshing: true), "正在刷新…")
+        XCTAssertEqual(PanelText.updated(last: nil, now: now, refreshing: false), "")
+        XCTAssertEqual(PanelText.ago(last: now.addingTimeInterval(-300), now: now), "5 分钟前")
+    }
+
+    func testTabValue() {
+        let w = QuotaWindow(kind: .weekly, remainingPercent: 77, resetsAt: nil)
+        let f = QuotaWindow(kind: .fiveHour, remainingPercent: 64, resetsAt: nil)
+        XCTAssertEqual(PanelText.tabPercent(ServiceSnapshot(status: .ok, weekly: w, fiveHour: f)), "77%")
+        XCTAssertEqual(PanelText.tabPercent(ServiceSnapshot(status: .ok, fiveHour: f)), "64%")
+        XCTAssertEqual(PanelText.tabWindow(ServiceSnapshot(status: .ok, fiveHour: f))?.kind, .fiveHour)
+        XCTAssertEqual(PanelText.tabPercent(ServiceSnapshot(status: .ok)), "—")
+        XCTAssertEqual(PanelText.tabPercent(ServiceSnapshot(status: .notLoggedIn, weekly: w)), "—")
+        XCTAssertEqual(PanelText.tabPercent(ServiceSnapshot(status: .fetchFailed, weekly: w)), "77%")   // 失败保留上次值
     }
 }

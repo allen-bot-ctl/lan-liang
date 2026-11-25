@@ -17,6 +17,41 @@ func quitWithFallback() {
     NSApp.terminate(nil)
 }
 
+#if canImport(Sparkle)
+/// Sparkle 温和提醒（契约 0.2.0 §3）：定时检查找到新版本不弹窗，只在面板升级按钮上亮红点。
+final class UpdateWatcher: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDelegate {
+    var onResult: (String?) -> Void = { _ in }
+
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        let v = item.displayVersionString
+        DispatchQueue.main.async { self.onResult(v) }
+    }
+
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
+        DispatchQueue.main.async { self.onResult(nil) }
+    }
+
+    var supportsGentleScheduledUpdateReminders: Bool { true }
+
+    func standardUserDriverShouldHandleShowingScheduledUpdate(_ update: SUAppcastItem, andInImmediateFocus immediateFocus: Bool) -> Bool {
+        false
+    }
+}
+#endif
+
+/// 面板内容的圆角遮罩（圆角 10）。
+func roundedMask(_ r: CGFloat) -> NSImage {
+    let edge = 2 * r + 1
+    let img = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+        NSColor.black.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: r, yRadius: r).fill()
+        return true
+    }
+    img.capInsets = NSEdgeInsets(top: r, left: r, bottom: r, right: r)
+    img.resizingMode = .stretch
+    return img
+}
+
 func argValue(_ name: String) -> String? {
     CommandLine.arguments.first { $0.hasPrefix("--\(name)=") }.map { String($0.dropFirst(name.count + 3)) }
 }
@@ -28,6 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItemCount = 0
     private var panel: FloatingPanel?
     private var host: NSHostingView<PanelView>?
+    private var settingsWindow: NSWindow?
+    private let settingsModel = SettingsModel()
     private var outsideMonitor: Any?
     private let contextMenu = NSMenu()
     private let loginItem = NSMenuItem(title: "登录时启动", action: #selector(toggleLogin), keyEquivalent: "")
@@ -38,29 +75,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isDebug: Bool { args.contains { $0.hasPrefix("--debug-") } || ProcessInfo.processInfo.environment["LANLIANG_FAKE"] != nil }
 
     #if canImport(Sparkle)
+    private let updateWatcher = UpdateWatcher()
     /// 没配置 Sparkle 公钥时不启动更新器，避免启动就弹错误框。
-    private let updater = SPUStandardUpdaterController(
+    private lazy var updater = SPUStandardUpdaterController(
         startingUpdater: !((Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String) ?? "").isEmpty,
-        updaterDelegate: nil, userDriverDelegate: nil)
+        updaterDelegate: updateWatcher, userDriverDelegate: updateWatcher)
     #endif
 
     func applicationDidFinishLaunching(_ n: Notification) {
         // 诊断：在本机实测 Gemini 历史扫描三段用时（只打印数字，不打印路径以外的任何内容），然后退出。
         if args.contains("--debug-gemini-scan-timing") {
             DispatchQueue.global(qos: .userInitiated).async {
-                let home = FileManager.default.homeDirectoryForCurrentUser
-                let tmpCache = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("lanliang-timing-\(UUID().uuidString).json")
-                defer { try? FileManager.default.removeItem(at: tmpCache) }
-                let s1 = GeminiHistoryScanner(home: home, cacheURL: tmpCache)
-                let r = s1.scan(); let t = s1.lastTimings
-                print(String(format: "GEMINI_SCAN_TIMING first: total=%.3fs copy=%.3fs sqlite=%.3fs decode=%.3fs dbs=%d failed=%d opened=%d",
-                             t.total, t.copy, t.sqlite, t.decode, r.conversations, r.failed, s1.openCount))
-                let s2 = GeminiHistoryScanner(home: home, cacheURL: tmpCache)
-                let t0 = CFAbsoluteTimeGetCurrent()
-                _ = s2.loadDiskCache()
-                let load = CFAbsoluteTimeGetCurrent() - t0
-                _ = s2.scan()
-                print(String(format: "GEMINI_SCAN_TIMING cached: load=%.4fs rescan=%.4fs opened=%d", load, s2.lastTimings.total, s2.openCount))
+                let x = GeminiScanTiming.run(home: FileManager.default.homeDirectoryForCurrentUser)
+                for l in GeminiScanTiming.lines(x) { print(l) }
                 fflush(stdout)
                 exit(0)
             }
@@ -73,6 +100,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let r = argValue("debug-range"), let v = TokenRange(rawValue: r) { model.range = v }
         model.hoverKey = argValue("debug-hover")
         model.onRefresh = { [weak self] in self?.refresh() }
+        model.appVersion = appVersion
+        model.hoverButton = argValue("debug-hover-button")
+        if let v = argValue("debug-update") { model.availableUpdate = v }
+        model.onCheckUpdates = { [weak self] in self?.checkUpdatesFromPanel() }
+        model.onOpenSettings = { [weak self] in self?.openSettings() }
+        #if canImport(Sparkle)
+        updateWatcher.onResult = { [weak self] v in self?.setAvailableUpdate(v) }
+        _ = updater
+        #endif
         // 切页签、切区间、历史结果到达后，面板高度跟着内容走。
         model.$tab.map { _ in () }.merge(with: model.$range.map { _ in () }, model.$geminiHistory.map { _ in () },
                                           model.$officialLoaded.map { _ in () })
@@ -96,7 +132,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
 
-        if args.contains("--debug-open-panel") {
+        if args.contains("--debug-open-settings") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                self.openSettings()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.printRects() }
+            }
+        } else if args.contains("--debug-open-panel") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 self.showPanel(from: self.statusItem.button)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.printRects() }
@@ -181,13 +222,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func ensurePanel() {
         guard panel == nil else { return }
         let h = NSHostingView(rootView: PanelView(model: model))
-        let p = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 300),
+        let p = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                               styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.isFloatingPanel = true
         p.level = .statusBar
         p.hasShadow = true
-        p.backgroundColor = .windowBackgroundColor
-        p.contentView = h
+        p.backgroundColor = .clear
+        p.isOpaque = false
+        // 半透明圆角（契约 0.2.0 §2）：内容放在 .popover 材质里，圆角 10。
+        let fx = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        fx.material = .popover
+        fx.blendingMode = .behindWindow
+        fx.state = .active
+        fx.maskImage = roundedMask(10)
+        h.frame = fx.bounds
+        h.autoresizingMask = [.width, .height]
+        fx.addSubview(h)
+        p.contentView = fx
         host = h
         panel = p
     }
@@ -204,6 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         panel.setFrame(NSRect(x: x, y: r.minY - size.height - 4, width: size.width, height: size.height), display: true)
         panel.orderFrontRegardless()
+        panel.invalidateShadow()
         if outsideMonitor == nil {
             outsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
                 self?.hidePanel()
@@ -225,6 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         f.origin.y = f.maxY - size.height
         f.size = size
         panel.setFrame(f, display: true)
+        panel.invalidateShadow()
     }
 
     // MARK: 刷新
@@ -242,6 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.async { self.fitPanel() }
             },
             onCodexOfficial: { [weak self] o in
+                guard self?.args.contains("--debug-loading") == false else { return }
                 self?.model.official = o
                 self?.model.officialLoaded = true
             },
@@ -251,9 +305,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.updateMenuBar()
                 DispatchQueue.main.async { self.fitPanel() }
             },
-            onAllDone: { [weak self] in self?.model.refreshing = false }))
+            onAllDone: { [weak self] in
+                guard let self = self else { return }
+                // 截图用：--debug-loading 停在加载态（转圈、「正在统计…」）。
+                if self.args.contains("--debug-loading") { return }
+                self.model.refreshing = false
+                self.model.lastUpdated = Date()
+            }))
         // Gemini 本机历史单独在后台扫，不拖慢额度和菜单栏。
-        source.refreshGeminiHistory { [weak self] h in self?.model.geminiHistory = h }
+        source.refreshGeminiHistory { [weak self] h in
+            guard let self = self, !self.args.contains("--debug-loading") else { return }
+            self.model.geminiHistory = h
+        }
     }
 
     // MARK: 登录时启动
@@ -275,12 +338,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             try? SMAppService.mainApp.register()
         }
+        settingsModel.launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
     @objc private func checkUpdates() {
         #if canImport(Sparkle)
         updater.checkForUpdates(nil)
         #endif
+    }
+
+    private var appVersion: String {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? ""
+    }
+
+    private func setAvailableUpdate(_ v: String?) {
+        model.availableUpdate = v
+        settingsModel.availableUpdate = v
+    }
+
+    /// 面板在 statusBar 层级，先收起面板、激活 App，再弹 Sparkle（契约 0.2.0 §3）。
+    private func checkUpdatesFromPanel() {
+        hidePanel()
+        NSApp.activate(ignoringOtherApps: true)
+        checkUpdates()
+    }
+
+    // MARK: 设置窗口（契约 0.2.0 §7）
+
+    private func openSettings() {
+        hidePanel()
+        settingsModel.version = appVersion
+        settingsModel.availableUpdate = model.availableUpdate
+        settingsModel.launchAtLogin = SMAppService.mainApp.status == .enabled
+        #if canImport(Sparkle)
+        settingsModel.autoCheck = updater.updater.automaticallyChecksForUpdates
+        #endif
+        settingsModel.setLaunchAtLogin = { [weak self] on in self?.setLogin(on) }
+        settingsModel.setAutoCheck = { [weak self] on in
+            #if canImport(Sparkle)
+            self?.updater.updater.automaticallyChecksForUpdates = on
+            #endif
+        }
+        settingsModel.onCheckUpdates = { [weak self] in
+            NSApp.activate(ignoringOtherApps: true)
+            self?.checkUpdates()
+        }
+        settingsModel.onQuit = { quitWithFallback() }
+        if settingsWindow == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 160),
+                             styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            w.title = "栏量设置"
+            w.isReleasedWhenClosed = false
+            w.contentViewController = NSHostingController(rootView: SettingsView(model: settingsModel))
+            w.center()
+            settingsWindow = w
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        settingsWindow?.orderFrontRegardless()
+    }
+
+    private func setLogin(_ on: Bool) {
+        if on { try? SMAppService.mainApp.register() } else { try? SMAppService.mainApp.unregister() }
+        settingsModel.launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
     @objc private func quit() { quitWithFallback() }
@@ -300,7 +420,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             itemWidth = r.width
             print("DEBUG_RECT_ITEM \(top(r))")
         }
-        if let p = panel { print("DEBUG_RECT_PANEL \(top(p.frame))") }
+        if args.contains("--debug-open-settings"), let w = settingsWindow {
+            print("DEBUG_RECT_PANEL \(top(w.frame))")
+        } else if let p = panel { print("DEBUG_RECT_PANEL \(top(p.frame))") }
         let rs = rows
         let groups = rs.map { "\($0.service.rawValue):\($0.primary)\($0.secondary.map { "+" + $0 } ?? "")" }
         let content = String(format: "%.1f", MenuBarLayout.width(rs))

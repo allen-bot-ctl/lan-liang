@@ -7,7 +7,7 @@ macOS 菜单栏小工具：显示 Codex 与 Gemini（Google Antigravity 登录�
 - 需求契约：`docs/changes/0.1.0.md`。
 
 ## 参考说明
-设计时参考了开源项目 [Quosparr](https://github.com/Licoy/Quosparr)（AGPL-3.0）读取了哪些本地文件（`~/.codex/auth.json`、`~/.codex/sessions/**/*.jsonl`、Antigravity 的 OAuth token 文件与钥匙串项）和调用了哪些接口（chatgpt.com `wham/usage`、`wham/profiles/me`，Cloud Code `loadCodeAssist`、`retrieveUserQuotaSummary`），并对照 openai/codex 与 google-gemini/gemini-cli 的公开源码核对格式。本仓库代码全部从零编写，没有包含或改写 Quosparr 的任何代码。
+设计时参考了开源项目 [Quosparr](https://github.com/Licoy/Quosparr)（AGPL-3.0）读取了哪些本地文件（`~/.codex/auth.json`、Antigravity 的 OAuth token 文件与钥匙串项）和调用了哪些接口（chatgpt.com `wham/usage`、`wham/profiles/me`，Cloud Code `loadCodeAssist`、`retrieveUserQuotaSummary`），并对照 openai/codex 与 google-gemini/gemini-cli 的公开源码核对格式。本仓库代码全部从零编写，没有包含或改写 Quosparr 的任何代码。
 
 ## 开发
 - 纯逻辑：`Sources/LanLiangCore`，`swift test` 运行单测。
