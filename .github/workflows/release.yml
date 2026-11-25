@@ -172,17 +172,7 @@ jobs:
       - name: Release notes file exists
         run: test -s "release-notes/v${VERSION}.md" || { echo "::error::缺少 release-notes/v${VERSION}.md"; exit 1; }
 
-      - name: Screenshots
-        run: scripts/ci_screenshots.sh
-
-      - name: Upload screenshots
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: screenshots
-          if-no-files-found: warn
-          path: shots/
+      # 截图只在 ci.yml 里跑（发版前 PM 已按 CI 截图走查），发版不再重复跑，省 5–8 分钟（PM 2026-11-25 05:38 定）。
 
       - name: Sign zip and generate appcast.xml
         env:
