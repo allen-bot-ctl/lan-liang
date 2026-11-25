@@ -1334,3 +1334,81 @@ final class DisabledServiceRequestTests: XCTestCase {
         XCTAssertEqual(counter.count("gemini-deliver"), 0)
     }
 }
+
+// MARK: 0.3.1 消耗汇总堆叠柱
+
+final class StackedSeriesTests: XCTestCase {
+    let cal = TokenSeries.calendar(timeZone: TimeZone(identifier: "UTC")!)
+    var now: Date { cal.date(from: DateComponents(year: 2026, month: 11, day: 25, hour: 12))! }
+    let codex: [String: Int64] = ["2026-11-25": 320_000_000, "2026-11-24": 100_000_000, "2026-10-01": 5_000]
+    let gemini: [String: Int64] = ["2026-11-25": 40_000_000, "2026-11-23": 7_000]
+
+    func testDailyStacksBothServices() {
+        let s = StackedSeries.bars(range: .daily, codex: codex, gemini: gemini, now: now, calendar: cal)
+        XCTAssertEqual(s.count, 30)
+        let last = s.last!
+        XCTAssertEqual(last.bar.key, "2026-11-25")
+        XCTAssertEqual(last.codex, 320_000_000)
+        XCTAssertEqual(last.gemini, 40_000_000)
+        XCTAssertEqual(last.total, 360_000_000)
+        XCTAssertEqual(last.bar.value, 360_000_000)   // 坐标轴和悬停用合计
+        XCTAssertEqual(s[28].codex, 100_000_000); XCTAssertEqual(s[28].gemini, 0)
+        XCTAssertEqual(s[27].codex, 0); XCTAssertEqual(s[27].gemini, 7_000)
+        // 和面板单服务柱子的区间完全一致
+        let panel = TokenSeries.bars(range: .daily, official: nil, local: codex, now: now, calendar: cal)
+        XCTAssertEqual(s.map { $0.bar.key }, panel.map { $0.key })
+        XCTAssertEqual(s.map { $0.codex }, panel.map { $0.value })
+    }
+
+    func testMonthlyAndWeeklyMerge() {
+        let m = StackedSeries.bars(range: .monthly, codex: codex, gemini: gemini, now: now, calendar: cal)
+        XCTAssertEqual(m.count, 6)
+        XCTAssertEqual(m.last!.codex, 420_000_000)
+        XCTAssertEqual(m.last!.gemini, 40_007_000)
+        XCTAssertEqual(m[m.count - 2].codex, 5_000)
+        let w = StackedSeries.bars(range: .weekly, codex: codex, gemini: gemini, now: now, calendar: cal)
+        XCTAssertEqual(w.count, 12)
+        // 周一开始：11/23 是周一，本周 = 11/23–11/29
+        XCTAssertEqual(w.last!.bar.key, "2026-11-23")
+        XCTAssertEqual(w.last!.total, 420_000_000 + 40_007_000)
+        let sumAll = m.map { $0.total }.reduce(0, +)
+        XCTAssertEqual(sumAll, codex.values.reduce(0, +) + gemini.values.reduce(0, +))
+    }
+
+    func testMissingServiceDrawsOnlyTheOther() {
+        // Codex 失败（nil）：只剩 Gemini 段
+        let s = StackedSeries.bars(range: .daily, codex: nil, gemini: gemini, now: now, calendar: cal)
+        XCTAssertEqual(s.last!.codex, 0)
+        XCTAssertEqual(s.last!.total, 40_000_000)
+        let only = StackedSeries.bars(range: .daily, codex: codex, gemini: nil, now: now, calendar: cal)
+        XCTAssertEqual(only.last!.total, 320_000_000)
+    }
+
+    func testTipLines() {
+        let s = StackedSeries.bars(range: .daily, codex: codex, gemini: gemini, now: now, calendar: cal).last!
+        XCTAssertEqual(StackedSeries.tipLines(s), ["11月25日", "Codex 3.20亿", "Gemini 4000.00万", "合计 3.60亿 Tokens"])
+    }
+
+    func testAxisMaxIsLargestTotal() {
+        let s = StackedSeries.bars(range: .daily, codex: codex, gemini: gemini, now: now, calendar: cal)
+        XCTAssertEqual(StackedSeries.axisMax(s), 360_000_000)
+        XCTAssertEqual(StackedSeries.axisMax(s), s.map { $0.bar.value }.max())
+        XCTAssertEqual(StackedSeries.axisMax([]), 1)
+        // 最长刻度：99.99亿
+        let big = StackedSeries.bars(range: .daily, codex: ["2026-11-25": 9_000_000_000], gemini: ["2026-11-25": 999_000_000],
+                                     now: now, calendar: cal)
+        XCTAssertEqual(Fmt.axisTokens(StackedSeries.axisMax(big)), "99.99亿")
+    }
+
+    func testStackSumsEqualTotalForEachRange() {
+        for r in TokenRange.allCases {
+            let s = StackedSeries.bars(range: r, codex: codex, gemini: gemini, now: now, calendar: cal)
+            let c = TokenSeries.bars(range: r, official: nil, local: codex, now: now, calendar: cal)
+            let g = TokenSeries.bars(range: r, official: nil, local: gemini, now: now, calendar: cal)
+            for i in s.indices {
+                XCTAssertEqual(s[i].codex + s[i].gemini, s[i].total)
+                XCTAssertEqual(s[i].total, c[i].value + g[i].value)
+            }
+        }
+    }
+}

@@ -110,6 +110,24 @@ for ap in dark light; do
     [ "$(cut -d, -f3 <<<"$r")" = 520 ] || { echo "::error::设置窗口宽度不是 520: $r"; exit 1; }
   done
 done
+# 0.3.1：消耗汇总里和面板同一个柱状图（两个都开堆叠、只开一个单色、Codex 失败只画 Gemini），悬停最高的柱子。
+for ap in dark light; do
+  if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
+  nf="$PWD/fixtures/normal.json"
+  LANLIANG_FAKE="$nf" shoot "-v031-settings-stacked-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=codex,gemini --debug-hover=auto
+  LANLIANG_FAKE="$nf" shoot "-v031-settings-stacked-monthly-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=codex,gemini --debug-summary-range=monthly
+  # 四行气泡不超出图区：悬停最左、最右的柱子（契约 0.3.1 验收 3）。
+  LANLIANG_FAKE="$nf" shoot "-v031-settings-hover-first-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=codex,gemini --debug-hover=first
+  LANLIANG_FAKE="$nf" shoot "-v031-settings-hover-last-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=codex,gemini --debug-hover=last
+  LANLIANG_FAKE="$nf" shoot "-v031-settings-gemini-only-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=gemini
+  LANLIANG_FAKE="$nf" shoot "-v031-settings-single-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=codex --debug-hover=auto
+  LANLIANG_FAKE="$PWD/fixtures/official-failed.json" shoot "-v031-settings-incomplete-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=codex,gemini --debug-hover=auto
+  for t in stacked stacked-monthly hover-first hover-last gemini-only single incomplete; do
+    r=$(awk '/^DEBUG_RECT_PANEL/{print $2}' "/tmp/shots--v031-settings-$t-$ap.log" | tail -n 1)
+    echo "RELEASE: settings v031 $t $ap rect=$r"
+    [ "$(cut -d, -f3 <<<"$r")" = 520 ] || { echo "::error::设置窗口宽度不是 520: $r"; exit 1; }
+  done
+done
 # 0.2.1：快速来回切页签 20/21 次后（停在 Codex / Gemini），面板顶边不动、内容视图和窗口一致。
 for ap in dark light; do
   if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi

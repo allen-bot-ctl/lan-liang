@@ -457,18 +457,23 @@ struct TokenChartSection: View {
         return (msg, d == .allFailed)
     }
 
-    func axisKeys(_ bars: [TokenBar]) -> [String] {
-        switch model.range {
+    func axisKeys(_ bars: [TokenBar]) -> [String] { Self.axisKeysFor(bars, range: model.range) }
+
+    func axisLabel(_ key: String) -> String { Self.axisLabelFor(key, range: model.range) }
+
+    /// 横轴标哪几根（面板和设置窗口共用）。
+    static func axisKeysFor(_ bars: [TokenBar], range: TokenRange) -> [String] {
+        switch range {
         case .daily: return bars.enumerated().filter { $0.offset % 7 == 0 }.map { $0.element.key }
         case .weekly: return bars.enumerated().filter { $0.offset % 3 == 0 }.map { $0.element.key }
         case .monthly: return bars.map { $0.key }
         }
     }
 
-    func axisLabel(_ key: String) -> String {
+    static func axisLabelFor(_ key: String, range: TokenRange) -> String {
         let p = key.split(separator: "-")
         guard p.count == 3, let m = Int(p[1]), let d = Int(p[2]) else { return key }
-        return model.range == .monthly ? "\(m)月" : "\(m)/\(d)"
+        return range == .monthly ? "\(m)月" : "\(m)/\(d)"
     }
 }
 
@@ -562,6 +567,10 @@ struct BarChart: View {
     let axisKeys: Set<String>
     let axisLabel: (String) -> String
     @Binding var hover: String?
+    /// 堆叠柱（0.3.1 设置窗口消耗汇总）：按柱子 key 给出 Codex（下）和 Gemini（上）两段；nil = 单色柱（面板）。
+    var stacks: [String: StackedBar]? = nil
+    /// 悬停时用四行堆叠气泡（日期、Codex、Gemini、合计）；false = 面板原样的两行气泡。
+    var stackedTip = false
     @Environment(\.colorScheme) private var scheme
 
     /// 刻度列宽：按最宽的刻度文字量出来（「44.83亿」「8900万」不截断）。
@@ -599,11 +608,25 @@ struct BarChart: View {
                 ForEach(Array(bars.enumerated()), id: \.element.key) { i, b in
                     let h = b.value > 0 ? max(plotH * CGFloat(Double(b.value) / Double(maxV)), 2) : 0
                     let x = axisWidth + slot * (CGFloat(i) + 0.5)
-                    TopRounded(radius: 2)
-                        .fill(Theme.gradient)
+                    if let st = stacks?[b.key], st.total > 0 {
+                        // Codex 橙色在下、Gemini #8E8CF5 在上；只有一段时整根柱子就是那一段的颜色。
+                        let hb = h * CGFloat(Double(st.codex) / Double(st.total))
+                        ZStack(alignment: .bottom) {
+                            TopRounded(radius: 2).fill(st.gemini > 0 ? Theme.geminiFill : Theme.codexFill)
+                            if st.gemini > 0 && st.codex > 0 {
+                                Rectangle().fill(Theme.codexFill).frame(height: hb)
+                            }
+                        }
                         .opacity(active == nil || b.key == active ? 1 : 0.45)
                         .frame(width: max(slot * 0.64, 1), height: h)
                         .position(x: x, y: topPad + plotH - h / 2)
+                    } else {
+                        TopRounded(radius: 2)
+                            .fill(Theme.gradient)
+                            .opacity(active == nil || b.key == active ? 1 : 0.45)
+                            .frame(width: max(slot * 0.64, 1), height: h)
+                            .position(x: x, y: topPad + plotH - h / 2)
+                    }
                     if axisKeys.contains(b.key) {
                         Text(axisLabel(b.key)).font(.system(size: 10).monospacedDigit()).foregroundColor(th.ink.opacity(0.5))
                             .fixedSize()
@@ -627,9 +650,17 @@ struct BarChart: View {
                         }
                     }
                 if let k = active, let i = bars.firstIndex(where: { $0.key == k }) {
-                    TooltipView(bar: bars[i])
-                        .position(x: min(max(axisWidth + slot * (CGFloat(i) + 0.5), 64), geo.size.width - 64), y: 18)
-                        .allowsHitTesting(false)
+                    if stackedTip, let st = stacks?[k] {
+                        // 四行气泡（契约 0.3.1 §2）：按气泡实际宽度夹在图区内，竖直放在图区上部不出界。
+                        StackedTipView(stack: st)
+                            .position(x: min(max(axisWidth + slot * (CGFloat(i) + 0.5), axisWidth + 62), geo.size.width - 62),
+                                      y: 38)
+                            .allowsHitTesting(false)
+                    } else {
+                        TooltipView(bar: bars[i])
+                            .position(x: min(max(axisWidth + slot * (CGFloat(i) + 0.5), 64), geo.size.width - 64), y: 18)
+                            .allowsHitTesting(false)
+                    }
                 }
             }
         }
@@ -642,5 +673,34 @@ struct TooltipView: View {
 
     var body: some View {
         TipBubble(lines: [bar.label, "\(Fmt.tokens(bar.value)) Tokens"], boldLine: 1)
+    }
+}
+
+/// 堆叠柱的悬停气泡（契约 0.3.1 §2）：日期；色块 +「Codex 2.86亿」；色块 +「Gemini 6600万」；「合计 3.52亿 Tokens」半粗。
+struct StackedTipView: View {
+    let stack: StackedBar
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let th = Theme(scheme)
+        let lines = StackedSeries.tipLines(stack)
+        VStack(alignment: .leading, spacing: 1) {
+            Text(lines[0]).lineLimit(1)
+            HStack(spacing: 4) {
+                Circle().fill(Theme.codexFill).frame(width: 6, height: 6)
+                Text(lines[1]).lineLimit(1)
+            }
+            HStack(spacing: 4) {
+                Circle().fill(Theme.geminiFill).frame(width: 6, height: 6)
+                Text(lines[2]).lineLimit(1)
+            }
+            Text(lines[3]).fontWeight(.semibold).lineLimit(1)
+        }
+        .font(.system(size: 12).monospacedDigit())
+        .foregroundColor(th.tipInk)
+        .padding(.vertical, 5).padding(.horizontal, 8)
+        .background(RoundedRectangle(cornerRadius: 5).fill(th.tipBg))
+        .shadow(color: Color.black.opacity(0.2), radius: 4, x: 0, y: 2)
+        .fixedSize()
     }
 }

@@ -66,38 +66,11 @@ struct SettingsView: View {
         let sum = UsageSummary.make(selection: panel.services, official: panel.official,
                                     officialLoaded: panel.officialLoaded, gemini: panel.geminiHistory)
         return SettingsCard(title: "消耗汇总", detail: panel.services.isSingle ? "仅已开启的服务" : "Codex + Gemini 累计") {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("累计").font(.system(size: 12)).foregroundColor(th.ink2).lineLimit(1).fixedSize()
-                    if sum.incomplete {
-                        Text("不完整").font(.system(size: 10, weight: .semibold)).foregroundColor(Theme.accent)
-                            .lineLimit(1).fixedSize()
-                            .padding(.horizontal, 6).padding(.vertical, 1)
-                            .background(RoundedRectangle(cornerRadius: 5).fill(Theme.accent.opacity(0.14)))
-                    }
-                    Spacer(minLength: 8)
-                    if sum.loading {
-                        Text("正在统计…").font(.system(size: 13)).foregroundColor(th.ink3).lineLimit(1).fixedSize()
-                    } else {
-                        Text(sum.total.map { Fmt.tokens($0) } ?? "—")
-                            .font(.system(size: 28, weight: .semibold).monospacedDigit())
-                            .foregroundColor(th.ink).lineLimit(1).fixedSize()
-                        Text("Tokens").font(.system(size: 13)).foregroundColor(th.ink2).lineLimit(1).fixedSize()
-                    }
-                }
-                .frame(height: 34)
-                if sum.showsSplit {
-                    SplitBar(codexShare: sum.items.first(where: { $0.service == .codex })?.share ?? 0)
-                }
-                HStack(spacing: 18) {
-                    ForEach(sum.items, id: \.service) { item in
-                        LegendItem(item: item)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 12)
+            // 0.3.1：累计行（和面板「Token 用量」标题行同一种排法）+ 和面板同一个柱状图。
+            SummaryChart(panel: panel, summary: sum)
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+                .padding(.bottom, 12)
         }
     }
 
@@ -306,5 +279,88 @@ struct SettingRow: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 44)
+    }
+}
+
+/// 消耗汇总（契约 0.3.1）：第一行「累计」合计（全部数据，不随区间变）+「不完整」+ 每日/每周/每月分段；
+/// 下面复用面板的 BarChart：两个都开时堆叠（Codex 橙在下、Gemini #8E8CF5 在上），只开一个时和面板那家的图一样。
+/// 分段只在设置窗口里生效，默认每日。
+struct SummaryChart: View {
+    @ObservedObject var panel: PanelModel
+    let summary: UsageSummary
+    @State private var range: TokenRange
+    @State private var hover: String?
+    @Environment(\.colorScheme) private var scheme
+
+    init(panel: PanelModel, summary: UsageSummary) {
+        self.panel = panel
+        self.summary = summary
+        // 截图用 --debug-summary-range；默认每日，和面板的选择无关。
+        _range = State(initialValue: argValue("debug-summary-range").flatMap { TokenRange(rawValue: $0) } ?? .daily)
+    }
+
+    /// 开着且拿到了数据的服务各自的每日用量。
+    var codexDaily: [String: Int64]? { panel.services.codex && panel.officialLoaded ? panel.official : nil }
+    var geminiDaily: [String: Int64]? {
+        guard panel.services.gemini, let h = panel.geminiHistory, h.display != .allFailed else { return nil }
+        return h.daily
+    }
+
+    /// 两个都开时按堆叠画（一家拿不到时只剩另一段，Gemini 保持紫色）；只开一个时 nil = 面板同款单色柱。
+    static func stackMap(_ stacked: [StackedBar], both: Bool) -> [String: StackedBar]? {
+        guard both else { return nil }
+        var m: [String: StackedBar] = [:]
+        for s in stacked { m[s.bar.key] = s }
+        return m
+    }
+
+    /// 截图用悬停：auto = 最高的柱子，first / last = 最左 / 最右，其余按 key。
+    static func debugHover(_ key: String?, _ bars: [TokenBar]) -> String? {
+        switch key {
+        case "auto": return bars.max(by: { $0.value < $1.value })?.key
+        case "first": return bars.first?.key
+        case "last": return bars.last?.key
+        default: return key
+        }
+    }
+
+    var body: some View {
+        let th = Theme(scheme)
+        let c = codexDaily, g = geminiDaily
+        let both = panel.services.enabled.count >= 2
+        let stacked = StackedSeries.bars(range: range, codex: c, gemini: g, now: panel.now(), calendar: TokenSeries.calendar())
+        let bars = stacked.map { $0.bar }
+        let stacks = Self.stackMap(stacked, both: both)
+        let active = hover ?? Self.debugHover(panel.hoverKey, bars)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 6) {
+                Text("累计").font(.system(size: 12)).foregroundColor(th.ink2).lineLimit(1).fixedSize()
+                Text(summary.loading ? "正在统计…" : (summary.total.map { Fmt.tokens($0) } ?? "—"))
+                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .foregroundColor(summary.loading ? th.ink3 : th.ink).lineLimit(1).fixedSize()
+                if summary.incomplete {
+                    Text("不完整").font(.system(size: 10, weight: .semibold)).foregroundColor(Theme.accent)
+                        .lineLimit(1).fixedSize()
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(Theme.accent.opacity(0.14)))
+                }
+                Spacer(minLength: 0)
+                RangeSegment(range: $range)
+            }
+            if c == nil && g == nil {
+                // 两家都没拿到：复用面板的状态视图。
+                if summary.loading {
+                    LoadingBars(text: "正在统计…")
+                } else {
+                    FailedState(text: SettingsText.unavailable(panel.services.enabled.first ?? .codex),
+                                onRetry: { panel.onRefresh() })
+                }
+            } else {
+                BarChart(bars: bars, active: active, axisKeys: Set(TokenChartSection.axisKeysFor(bars, range: range)),
+                         axisLabel: { k in TokenChartSection.axisLabelFor(k, range: range) }, hover: $hover,
+                         stacks: stacks, stackedTip: both && c != nil && g != nil)
+                    .frame(height: TokenChartSection.chartHeight)
+            }
+        }
     }
 }
