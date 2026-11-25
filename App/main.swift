@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import ServiceManagement
+import Combine
 #if canImport(Sparkle)
 import Sparkle
 #endif
@@ -31,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let contextMenu = NSMenu()
     private let loginItem = NSMenuItem(title: "登录时启动", action: #selector(toggleLogin), keyEquivalent: "")
     private var timer: Timer?
+    private var subs: Set<AnyCancellable> = []
     private lazy var source: DataSource = makeDataSource()
     private let args = CommandLine.arguments
     private var isDebug: Bool { args.contains { $0.hasPrefix("--debug-") } || ProcessInfo.processInfo.environment["LANLIANG_FAKE"] != nil }
@@ -50,6 +52,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let r = argValue("debug-range"), let v = TokenRange(rawValue: r) { model.range = v }
         model.hoverKey = argValue("debug-hover")
         model.onRefresh = { [weak self] in self?.refresh() }
+        // 切页签、切区间、历史结果到达后，面板高度跟着内容走。
+        model.$tab.map { _ in () }.merge(with: model.$range.map { _ in () }, model.$geminiHistory.map { _ in () })
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.fitPanel() } }
+            .store(in: &subs)
         model.onReauthorizeKeychain = { [weak self] in self?.source.allowKeychainAgain(); self?.refresh() }
 
         statusItem = makeItem()
@@ -215,6 +221,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.updateMenuBar()
             DispatchQueue.main.async { self.fitPanel() }
         }
+        // Gemini 本机历史单独在后台扫，不拖慢额度和菜单栏。
+        source.refreshGeminiHistory { [weak self] h in self?.model.geminiHistory = h }
     }
 
     // MARK: 登录时启动

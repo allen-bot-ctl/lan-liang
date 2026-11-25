@@ -8,6 +8,8 @@ public struct FakeData: Codable, Equatable {
     /// nil = 官方接口失败（柱高用本机值，标题旁写「仅本机」）。
     public var official: [String: Int64]?
     public var local: [String: Int64]
+    /// Gemini 本机 Token 历史；nil = 首次扫描没完成（面板显示「正在统计…」）。
+    public var geminiHistory: GeminiHistory?
 
     public static func decode(_ data: Data) throws -> FakeData {
         let d = JSONDecoder()

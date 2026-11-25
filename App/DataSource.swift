@@ -14,6 +14,8 @@ protocol DataSource: AnyObject {
     func refresh(current: (ServiceSnapshot, ServiceSnapshot), completion: @escaping (RefreshResult) -> Void)
     func loadSync(into model: PanelModel)
     func allowKeychainAgain()
+    /// Gemini 本机 Token 历史：后台串行扫描，结果回主线程；扫描还在跑时不再新起。
+    func refreshGeminiHistory(completion: @escaping (GeminiHistory) -> Void)
 }
 
 func makeDataSource() -> DataSource {
@@ -50,6 +52,12 @@ final class FakeSource: DataSource {
     }
 
     func allowKeychainAgain() {}
+
+    func refreshGeminiHistory(completion: @escaping (GeminiHistory) -> Void) {
+        guard let d = FileManager.default.contents(atPath: path), let f = try? FakeData.decode(d),
+              let h = f.geminiHistory else { return }
+        DispatchQueue.main.async { completion(h) }
+    }
 }
 
 // MARK: - 真实数据（只读 ~/.codex、~/.gemini、钥匙串；只写自己的 ~/.lanliang）
@@ -84,6 +92,25 @@ final class LiveSource: DataSource {
 
     func loadSync(into model: PanelModel) {}
     func allowKeychainAgain() { gemini.allowKeychainAgain() }
+
+    private let historyQueue = DispatchQueue(label: "lanliang.gemini-history", qos: .utility)
+    private lazy var historyScanner = GeminiHistoryScanner(home: FileManager.default.homeDirectoryForCurrentUser)
+    /// 只在主线程读写。
+    private var historyBusy = false
+
+    func refreshGeminiHistory(completion: @escaping (GeminiHistory) -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !historyBusy else { return }
+        historyBusy = true
+        historyQueue.async { [weak self] in
+            guard let self = self else { return }
+            let r = self.historyScanner.scan()
+            DispatchQueue.main.async {
+                self.historyBusy = false
+                completion(r)
+            }
+        }
+    }
 }
 
 // MARK: Codex

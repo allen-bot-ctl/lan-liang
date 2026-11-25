@@ -61,6 +61,7 @@ CASES=(
   "sub-rolled codex daily" "sub-lt1day codex daily" "sub-expired codex daily" "official-failed codex daily"
   "failed codex daily" "failed gemini" "expired codex daily" "expired gemini" "keychain-denied gemini"
   "both-weekly codex daily" "codex-only codex daily" "gemini-only gemini" "none codex daily"
+  "normal gemini weekly" "gemini-partial gemini daily" "gemini-empty gemini daily" "gemini-none gemini daily"
 )
 for ap in dark light; do
   if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
