@@ -582,3 +582,272 @@ final class MenuBarBaselineTests: XCTestCase {
 }
 #endif
 
+
+// MARK: 0.1.4 Gemini 本机 Token 历史
+
+/// 测试里手写 protobuf（只为造合成数据）。
+enum PB {
+    static func varint(_ v: UInt64) -> Data {
+        var v = v, d = Data()
+        repeat { var b = UInt8(v & 0x7f); v >>= 7; if v != 0 { b |= 0x80 }; d.append(b) } while v != 0
+        return d
+    }
+    static func key(_ n: UInt64, _ t: UInt64) -> Data { varint(n << 3 | t) }
+    static func u(_ n: UInt64, _ v: UInt64) -> Data { key(n, 0) + varint(v) }
+    static func bytes(_ n: UInt64, _ d: Data) -> Data { key(n, 2) + varint(UInt64(d.count)) + d }
+    static func str(_ n: UInt64, _ s: String) -> Data { bytes(n, Data(s.utf8)) }
+    static func ts(_ n: UInt64, _ d: Date) -> Data { bytes(n, u(1, UInt64(d.timeIntervalSince1970)) + u(2, 5)) }
+    static func usage(input: UInt64 = 0, output: UInt64 = 0, cw: UInt64 = 0, cr: UInt64 = 0, think: UInt64 = 0, resp: UInt64 = 0) -> Data {
+        let f: [(UInt64, UInt64)] = [(2, input), (3, output), (4, cw), (5, cr), (9, think), (10, resp)]
+        return f.filter { $0.1 > 0 }.reduce(Data()) { $0 + u($1.0, $1.1) }
+    }
+    static func step(at: Date?, usage: Data?) -> Data {
+        (at.map { ts(1, $0) } ?? Data()) + (usage.map { bytes(9, $0) } ?? Data())
+    }
+    static func gen(usage: Data, lastStep: Int?, model: String = "claude-sonnet-4") -> Data {
+        var call = bytes(4, usage) + str(19, model)
+        if let l = lastStep { call += bytes(20, str(1, "last_step_index") + str(2, String(l))) }
+        call += bytes(20, str(1, "used_claude") + str(2, "true"))
+        return bytes(1, call)
+    }
+}
+
+final class ProtobufTests: XCTestCase {
+    func testWireTypes() {
+        var d = PB.u(1, 300) + PB.str(2, "hi")
+        d += PB.key(3, 1) + Data([1, 0, 0, 0, 0, 0, 0, 0])
+        d += PB.key(4, 5) + Data([2, 0, 0, 0])
+        d += PB.u(1, 7)                                    // last-wins
+        let m = ProtoMessage(d)!
+        XCTAssertEqual(m.uint(1), 7); XCTAssertEqual(m.string(2), "hi"); XCTAssertEqual(m.uint(3), 1); XCTAssertEqual(m.uint(4), 2)
+        XCTAssertNil(m.uint(9))
+    }
+    func testInvalid() {
+        XCTAssertNil(ProtoMessage(PB.key(1, 2) + PB.varint(10) + Data([1, 2])))   // 截断
+        XCTAssertNil(ProtoMessage(PB.key(1, 3)))                                  // group
+        XCTAssertNil(ProtoMessage(Data([0x80])))                                  // 半个 varint
+        XCTAssertNil(ProtoMessage(PB.key(1, 1) + Data([1, 2, 3])))                // fixed64 不够 8 字节
+        XCTAssertNotNil(ProtoMessage(Data()))
+    }
+    func testTimestamp() {
+        let t = Date(timeIntervalSince1970: 1_795_000_000)
+        XCTAssertEqual(ProtoMessage(PB.ts(1, t))!.timestamp(1)!.timeIntervalSince1970, 1_795_000_000.000000005, accuracy: 1e-6)
+        XCTAssertNil(ProtoMessage(PB.bytes(1, PB.u(1, 0)))!.timestamp(1))
+    }
+}
+
+final class GeminiHistoryParseTests: XCTestCase {
+    let utc = TokenSeries.calendar(timeZone: TimeZone(identifier: "UTC")!)
+    let d1 = Date(timeIntervalSince1970: 1_795_000_000)          // 2026-11-18
+    var d2: Date { d1.addingTimeInterval(86_400) }
+
+    func testUsageRules() {
+        let u = GeminiCallUsage.parse(ProtoMessage(PB.usage(input: 100, cw: 3, cr: 40, think: 5, resp: 7))!)!
+        XCTAssertEqual(u.output, 12)                                 // 3 为 0 → 9 + 10
+        XCTAssertEqual(u.total, 100 + 12 + 40 + 3)
+        XCTAssertEqual(GeminiCallUsage.parse(ProtoMessage(PB.usage(output: 9, think: 5, resp: 7))!)!.output, 9)
+        XCTAssertNil(GeminiCallUsage.parse(ProtoMessage(PB.usage(think: 0))!))   // 没有计数不算
+        XCTAssertEqual(GeminiCallUsage.tokenTotal(GeminiCallUsage(input: 1, output: 2, cacheWrite: 4, cacheRead: 8)), 15)
+    }
+
+    func testStepsOnlyAndGensIgnored() {
+        let steps: [(idx: Int64, metadata: Data)] = [
+            (0, PB.step(at: d1, usage: nil)),
+            (1, PB.step(at: d1, usage: PB.usage(input: 10, output: 5))),
+            (2, Data([0xff, 0xff])),                                     // 坏 blob 跳过
+            (3, PB.step(at: d2, usage: PB.usage(input: 1, output: 1, cr: 8))),
+        ]
+        let gens = [PB.gen(usage: PB.usage(input: 999), lastStep: 0)]
+        let r = GeminiConversation.records(steps: steps, gens: gens)
+        XCTAssertEqual(r.map { $0.usage.total }, [15, 10])
+        XCTAssertEqual(GeminiConversation.daily(r, fallback: d1, calendar: utc), ["2026-11-18": 15, "2026-11-19": 10])
+    }
+
+    func testFallbackToGenMetadata() {
+        let steps: [(idx: Int64, metadata: Data)] = [(0, PB.step(at: d1, usage: nil)), (1, PB.step(at: d2, usage: nil))]
+        let gens = [PB.gen(usage: PB.usage(input: 20, think: 2, resp: 3), lastStep: 0),   // 时间 = 第 1 步
+                    Data([0x0a, 0x05]),                                              // 坏 blob
+                    PB.gen(usage: PB.usage(), lastStep: 0),                          // 没有计数
+                    PB.gen(usage: PB.usage(output: 4), lastStep: nil)]               // 没有时间
+        let r = GeminiConversation.records(steps: steps, gens: gens)
+        XCTAssertEqual(r.count, 2)
+        XCTAssertEqual(r[0].at, d2); XCTAssertEqual(r[0].usage.total, 25)
+        XCTAssertNil(r[1].at)
+        let fallback = d1.addingTimeInterval(-3 * 86_400)
+        XCTAssertEqual(GeminiConversation.daily(r, fallback: fallback, calendar: utc), ["2026-11-19": 25, "2026-11-15": 4])
+    }
+
+    func testDisplay() {
+        XCTAssertEqual(GeminiHistory(foundDirectory: false, conversations: 0, failed: 0, daily: [:]).display, .noDirectory)
+        XCTAssertEqual(GeminiHistory(foundDirectory: true, conversations: 0, failed: 0, daily: [:]).display, .empty)
+        XCTAssertEqual(GeminiHistory(foundDirectory: true, conversations: 2, failed: 0, daily: ["2026-11-18": 0]).display, .empty)
+        XCTAssertEqual(GeminiHistory(foundDirectory: true, conversations: 2, failed: 2, daily: [:]).display, .allFailed)
+        XCTAssertEqual(GeminiHistory(foundDirectory: true, conversations: 3, failed: 1, daily: ["2026-11-18": 5]).display, .chart(failed: 1))
+        XCTAssertEqual(GeminiHistory.message(.noDirectory), "没有找到 Antigravity 本机对话记录")
+        XCTAssertEqual(GeminiHistory.message(.empty), "Antigravity 本机暂无 Token 用量")
+        XCTAssertEqual(GeminiHistory.message(.allFailed), "Antigravity 对话记录读取失败")
+        XCTAssertNil(GeminiHistory.message(.chart(failed: 0)))
+    }
+}
+
+#if canImport(SQLite3)
+import SQLite3
+
+final class GeminiHistoryScanTests: XCTestCase {
+    var home: URL!
+    let utc = { TokenSeries.calendar(timeZone: TimeZone(identifier: "UTC")!) }
+    let d1 = Date(timeIntervalSince1970: 1_795_000_000)          // 2026-11-18 UTC
+    var open: [OpaquePointer] = []
+
+    override func setUpWithError() throws {
+        home = FileManager.default.temporaryDirectory.appendingPathComponent("lanliang-agy-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    }
+    override func tearDownWithError() throws {
+        open.forEach { sqlite3_close($0) }
+        try? FileManager.default.removeItem(at: home)
+    }
+
+    func dir(_ root: String) -> URL {
+        let u = home.appendingPathComponent(".gemini/\(root)/conversations")
+        try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+        return u
+    }
+
+    /// 造一个对话库。keepOpen：保持连接不关，最后一批写入只留在 -wal 里（不 checkpoint）。
+    @discardableResult
+    func makeDB(_ root: String, _ id: String, steps: [Data] = [], gens: [Data] = [], tables: Bool = true,
+                walExtra: [Data] = []) -> URL {
+        let path = dir(root).appendingPathComponent("\(id).db")
+        var h: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path.path, &h), SQLITE_OK)
+        func exec(_ s: String) { XCTAssertEqual(sqlite3_exec(h, s, nil, nil, nil), SQLITE_OK, s) }
+        func insert(_ sql: String, _ idx: Int, _ blob: Data) {
+            var st: OpaquePointer?
+            XCTAssertEqual(sqlite3_prepare_v2(h, sql, -1, &st, nil), SQLITE_OK)
+            sqlite3_bind_int64(st, 1, Int64(idx))
+            _ = blob.withUnsafeBytes { sqlite3_bind_blob(st, 2, $0.baseAddress, Int32(blob.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+            XCTAssertEqual(sqlite3_step(st), SQLITE_DONE)
+            sqlite3_finalize(st)
+        }
+        if tables {
+            exec("CREATE TABLE steps(idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB)")
+            exec("CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY, data BLOB)")
+            for (i, s) in steps.enumerated() { insert("INSERT INTO steps(idx, step_type, metadata) VALUES(?, 1, ?)", i, s) }
+            for (i, g) in gens.enumerated() { insert("INSERT INTO gen_metadata(idx, data) VALUES(?, ?)", i, g) }
+        } else {
+            exec("CREATE TABLE other(x)")
+        }
+        if walExtra.isEmpty {
+            sqlite3_close(h)
+        } else {
+            exec("PRAGMA journal_mode=WAL"); exec("PRAGMA wal_autocheckpoint=0")
+            for (i, s) in walExtra.enumerated() {
+                insert("INSERT INTO steps(idx, step_type, metadata) VALUES(?, 1, ?)", 1000 + i, s)
+            }
+            open.append(h!)
+        }
+        return path
+    }
+
+    func step(_ input: UInt64, at: Date?) -> Data { PB.step(at: at, usage: PB.usage(input: input)) }
+
+    func snapshotGemini() -> [String: String] {
+        var out: [String: String] = [:]
+        let root = home.appendingPathComponent(".gemini")
+        let en = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
+        while let u = en?.nextObject() as? URL {
+            let v = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            out[u.path] = "\(v?.fileSize ?? -1)@\(v?.contentModificationDate?.timeIntervalSince1970 ?? -1)"
+        }
+        return out
+    }
+
+    func testNoDirectory() {
+        let r = GeminiHistoryScanner(home: home, calendar: utc).scan()
+        XCTAssertEqual(r.display, .noDirectory)
+    }
+
+    func testStepsGensFailuresAndPB() throws {
+        makeDB("antigravity", "a", steps: [step(10, at: d1), step(5, at: d1.addingTimeInterval(86_400))])
+        makeDB("antigravity", "b", steps: [PB.step(at: d1, usage: nil)],
+               gens: [PB.gen(usage: PB.usage(input: 7, think: 1, resp: 2), lastStep: -1)])   // last_step_index -1 → 无效 → 无时间
+        makeDB("antigravity", "bad", tables: false)                                        // 两表都没有 → 失败
+        try Data("not sqlite".utf8).write(to: dir("antigravity").appendingPathComponent("junk.db"))  // 坏库 → 失败
+        try Data([1, 2, 3]).write(to: dir("antigravity").appendingPathComponent("old.pb"))   // .pb 不计也不算失败
+        let s = GeminiHistoryScanner(home: home, calendar: utc)
+        let r = s.scan()
+        XCTAssertEqual(r.conversations, 4)
+        XCTAssertEqual(r.failed, 2)
+        XCTAssertEqual(r.daily["2026-11-18"], 10)
+        XCTAssertEqual(r.daily["2026-11-19"], 5)
+        // b 没有时间：按文件修改时间那天计
+        let bDay = DayKey.of(GeminiHistoryScanner.signature(dir("antigravity").appendingPathComponent("b.db").path)!.latest, calendar: utc())
+        XCTAssertEqual(r.daily.values.reduce(0, +), 25)
+        XCTAssertGreaterThanOrEqual(r.daily[bDay] ?? 0, 10)
+        XCTAssertEqual(r.display, .chart(failed: 2))
+    }
+
+    func testAllFailed() throws {
+        makeDB("antigravity-ide", "x", tables: false)
+        XCTAssertEqual(GeminiHistoryScanner(home: home, calendar: utc).scan().display, .allFailed)
+    }
+
+    func testEmptyDirectory() {
+        _ = dir("antigravity-cli")
+        XCTAssertEqual(GeminiHistoryScanner(home: home, calendar: utc).scan().display, .empty)
+    }
+
+    func testWalDataIsRead() {
+        let p = makeDB("antigravity", "w", steps: [step(1, at: d1)], walExtra: [step(100, at: d1)])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: p.path + "-wal"))
+        let r = GeminiHistoryScanner(home: home, calendar: utc).scan()
+        XCTAssertEqual(r.daily["2026-11-18"], 101)
+        XCTAssertEqual(r.failed, 0)
+    }
+
+    func testDedupAndBackupIgnored() throws {
+        let old = makeDB("antigravity", "same", steps: [step(1, at: d1)])
+        let new = makeDB("antigravity-ide", "same", steps: [step(50, at: d1)])
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: old.path)
+        try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: new.path)
+        makeDB("antigravity-backup", "same", steps: [step(1000, at: d1)])
+        makeDB("antigravity-backup", "other", steps: [step(1000, at: d1)])
+        let r = GeminiHistoryScanner(home: home, calendar: utc).scan()
+        XCTAssertEqual(r.conversations, 1)
+        XCTAssertEqual(r.daily["2026-11-18"], 50)
+    }
+
+    func testCacheReuseChangeAndRemoval() throws {
+        makeDB("antigravity", "a", steps: [step(1, at: d1)])
+        let b = makeDB("antigravity", "b", steps: [step(2, at: d1)])
+        let s = GeminiHistoryScanner(home: home, calendar: utc)
+        XCTAssertEqual(s.scan().daily["2026-11-18"], 3); XCTAssertEqual(s.parseCount, 2)
+        XCTAssertEqual(s.scan().daily["2026-11-18"], 3); XCTAssertEqual(s.parseCount, 2)   // 没变：不复制不重读
+        // 改动 b：只重读 b
+        var h: OpaquePointer?
+        sqlite3_open(b.path, &h)
+        let blob = step(40, at: d1)
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(h, "INSERT INTO steps(idx, step_type, metadata) VALUES(9, 1, ?)", -1, &st, nil)
+        _ = blob.withUnsafeBytes { sqlite3_bind_blob(st, 1, $0.baseAddress, Int32(blob.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+        sqlite3_step(st); sqlite3_finalize(st); sqlite3_close(h)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 5)], ofItemAtPath: b.path)
+        XCTAssertEqual(s.scan().daily["2026-11-18"], 43); XCTAssertEqual(s.parseCount, 3)
+        // 删掉 b：结果里消失
+        try FileManager.default.removeItem(at: b)
+        let r = s.scan()
+        XCTAssertEqual(r.daily["2026-11-18"], 1); XCTAssertEqual(r.conversations, 1); XCTAssertEqual(s.parseCount, 3)
+    }
+
+    func testOriginalsUntouched() throws {
+        makeDB("antigravity", "a", steps: [step(1, at: d1)])
+        makeDB("antigravity-ide", "w", steps: [step(1, at: d1)], walExtra: [step(2, at: d1)])
+        try Data([9]).write(to: dir("antigravity").appendingPathComponent("legacy.pb"))
+        let before = snapshotGemini()
+        let s = GeminiHistoryScanner(home: home, calendar: utc)
+        _ = s.scan(); _ = s.scan()
+        XCTAssertEqual(snapshotGemini(), before)   // 大小、修改时间不变，也没有新文件
+    }
+}
+#endif
