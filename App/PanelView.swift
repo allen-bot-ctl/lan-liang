@@ -250,9 +250,9 @@ struct BarChart: View {
                     let y = plotH * (1 - f)
                     Path { p in p.move(to: CGPoint(x: axisWidth, y: y)); p.addLine(to: CGPoint(x: geo.size.width, y: y)) }
                         .stroke(Color.secondary.opacity(0.2), lineWidth: 0.5)
-                    Text(Fmt.tokens(Int64(Double(maxV) * f)))
+                    Text(Fmt.axisTokens(Int64(Double(maxV) * f)))
                         .font(.system(size: 9)).foregroundColor(.secondary)
-                        .lineLimit(1).minimumScaleFactor(0.6)
+                        .lineLimit(1)
                         .frame(width: axisWidth - 4, alignment: .trailing)
                         .position(x: (axisWidth - 4) / 2, y: min(max(y, 6), plotH - 6))
                 }

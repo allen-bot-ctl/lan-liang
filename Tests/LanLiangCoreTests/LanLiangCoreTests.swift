@@ -693,7 +693,7 @@ final class GeminiHistoryParseTests: XCTestCase {
 #if canImport(SQLite3)
 import SQLite3
 
-final class GeminiHistoryScanTests: XCTestCase {
+class GeminiDBTestCase: XCTestCase {
     var home: URL!
     let utc = { TokenSeries.calendar(timeZone: TimeZone(identifier: "UTC")!) }
     let d1 = Date(timeIntervalSince1970: 1_795_000_000)          // 2026-11-18 UTC
@@ -763,6 +763,9 @@ final class GeminiHistoryScanTests: XCTestCase {
         return out
     }
 
+}
+
+final class GeminiHistoryScanTests: GeminiDBTestCase {
     func testNoDirectory() {
         let r = GeminiHistoryScanner(home: home, calendar: utc).scan()
         XCTAssertEqual(r.display, .noDirectory)
@@ -848,6 +851,202 @@ final class GeminiHistoryScanTests: XCTestCase {
         let s = GeminiHistoryScanner(home: home, calendar: utc)
         _ = s.scan(); _ = s.scan()
         XCTAssertEqual(snapshotGemini(), before)   // 大小、修改时间不变，也没有新文件
+    }
+}
+#endif
+
+// MARK: 0.1.5 跳读解码、磁盘缓存、刻度
+
+final class ProtoScanTests: XCTestCase {
+    func scanStep(_ d: Data) -> (at: Date?, usage: GeminiCallUsage?)? { d.withUnsafeBytes { ProtoScan.stepMetadata($0) } }
+    func scanGen(_ d: Data) -> (usage: GeminiCallUsage?, step: Int64?)? { d.withUnsafeBytes { ProtoScan.genData($0) } }
+
+    func testSkipsOtherFieldsAndMatchesFullDecoder() {
+        let t = Date(timeIntervalSince1970: 1_795_000_000)
+        let big = Data(repeating: 0xAB, count: 100_000)            // 不需要的大字段：只跳过
+        let junkNested = PB.bytes(7, Data([0xff, 0xff, 0xff]))     // 子消息本身是坏的，但不解它
+        let cases: [Data] = [
+            PB.u(2, 5) + PB.bytes(3, big) + PB.ts(1, t) + junkNested + PB.bytes(9, PB.usage(input: 10, output: 2, cr: 3)),
+            PB.key(4, 1) + Data([1, 2, 3, 4, 5, 6, 7, 8]) + PB.key(5, 5) + Data([1, 2, 3, 4]) + PB.bytes(9, PB.usage(think: 4, resp: 6)),
+            PB.ts(1, t) + PB.ts(1, t.addingTimeInterval(86_400)) + PB.bytes(9, PB.usage(input: 1)) + PB.bytes(9, PB.usage(input: 9)),
+            PB.bytes(1, Data([0xff])) + PB.bytes(9, Data([0x80])),     // 时间和用量子消息都坏
+            PB.ts(1, t),                                               // 没有用量
+            PB.bytes(9, PB.usage()),                                   // 用量全 0
+        ]
+        for (i, c) in cases.enumerated() {
+            let full = ProtoMessage(c)!
+            let s = scanStep(c)
+            XCTAssertNotNil(s, "case \(i)")
+            XCTAssertEqual(s?.at, full.timestamp(1), "case \(i)")
+            XCTAssertEqual(s?.usage, full.message(9).flatMap(GeminiCallUsage.parse), "case \(i)")
+        }
+        XCTAssertEqual(scanStep(cases[1])?.usage?.output, 10)
+        XCTAssertEqual(scanStep(cases[2])?.usage?.input, 9)          // 最后一个生效
+        // 整条结构坏：跳过这一条
+        XCTAssertNil(scanStep(PB.key(1, 2) + PB.varint(50) + Data([1])))
+        XCTAssertNil(scanStep(PB.key(3, 3)))
+    }
+
+    func testGenData() {
+        let g = PB.gen(usage: PB.usage(input: 20, think: 2, resp: 3), lastStep: 4)
+        XCTAssertEqual(scanGen(g)?.usage?.total, 25)
+        XCTAssertEqual(scanGen(g)?.step, 5)
+        XCTAssertNil(scanGen(PB.gen(usage: PB.usage(output: 1), lastStep: nil))?.step)
+        XCTAssertNil(scanGen(PB.gen(usage: PB.usage(output: 1), lastStep: -1))?.step)
+        XCTAssertNil(scanGen(PB.gen(usage: PB.usage(), lastStep: 1))?.usage)
+        XCTAssertNil(scanGen(Data([0x0a, 0x05])))                    // 坏
+        XCTAssertNil(scanGen(PB.u(2, 1)))                            // 没有调用信息
+    }
+}
+
+final class AxisTickTests: XCTestCase {
+    func testTicks() {
+        XCTAssertEqual(Fmt.axisTokens(9_990_000), "999.00万")
+        XCTAssertEqual(Fmt.axisTokens(10_000_000), "1000万")
+        XCTAssertEqual(Fmt.axisTokens(44_500_000), "4450万")
+        XCTAssertEqual(Fmt.axisTokens(335_000_000), "3.35亿")
+        XCTAssertEqual(Fmt.axisTokens(0), "0")
+        // 悬停格式不变
+        XCTAssertEqual(Fmt.tokens(44_500_000), "4450.00万")
+        XCTAssertEqual(Fmt.tokens(9_990_000), "999.00万")
+        XCTAssertEqual(Fmt.tokens(335_000_000), "3.35亿")
+    }
+}
+
+#if canImport(SQLite3)
+final class GeminiDiskCacheTests: GeminiDBTestCase {
+    var cacheURL: URL { GeminiUsageCacheFile.url(home: home) }
+
+    func perms(_ u: URL) -> Int { ((try? FileManager.default.attributesOfItem(atPath: u.path))?[.posixPermissions] as? NSNumber)?.intValue ?? -1 }
+
+    func makeSet() {
+        makeDB("antigravity", "a", steps: [step(10, at: d1), PB.u(5, 1) + PB.bytes(3, Data(repeating: 1, count: 5000)) + PB.step(at: d1.addingTimeInterval(86_400), usage: PB.usage(input: 7, think: 2, resp: 1))])
+        makeDB("antigravity", "fb", steps: [PB.step(at: d1, usage: nil), PB.step(at: d1.addingTimeInterval(2 * 86_400), usage: nil)],
+               gens: [PB.gen(usage: PB.usage(input: 20), lastStep: 0), PB.gen(usage: PB.usage(output: 4), lastStep: nil), Data([0x0a, 0x05])])
+        makeDB("antigravity-ide", "w", steps: [step(1, at: d1)], walExtra: [step(100, at: d1), Data([0xff, 0xff])])
+        makeDB("antigravity-cli", "bad", tables: false)
+    }
+
+    func testV014AndV015SameDaily() throws {
+        makeSet()
+        let s = GeminiHistoryScanner(home: home, calendar: utc)
+        let r = s.scan()
+        // 0.1.4 读法逐库算一遍
+        var v014: [String: Int64] = [:]
+        var failed = 0
+        for e in s.list().entries {
+            let sig = GeminiHistoryScanner.signature(e.path.path)!
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("v014-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            let db = tmp.appendingPathComponent("c.db")
+            try FileManager.default.copyItem(at: e.path, to: db)
+            if FileManager.default.fileExists(atPath: e.path.path + "-wal") {
+                try FileManager.default.copyItem(atPath: e.path.path + "-wal", toPath: db.path + "-wal")
+            }
+            guard let rows = GeminiHistoryScanner.readRowsV014(db.path) else { failed += 1; continue }
+            let recs = GeminiConversation.records(steps: rows.steps, gens: rows.gens)
+            for (k, v) in GeminiConversation.daily(recs, fallback: sig.latest, calendar: utc()) { v014[k, default: 0] += v }
+        }
+        XCTAssertEqual(r.daily, v014)
+        XCTAssertEqual(r.failed, failed)
+        XCTAssertEqual(r.failed, 1)
+        XCTAssertEqual(r.daily["2026-11-18"], 10 + 101)
+        XCTAssertEqual(r.daily["2026-11-19"], 10)
+        XCTAssertEqual(r.daily["2026-11-20"], 20)
+    }
+
+    func testDiskCacheRoundTrip() throws {
+        makeSet()
+        let s1 = GeminiHistoryScanner(home: home, cacheURL: cacheURL, calendar: utc)
+        XCTAssertNil(s1.loadDiskCache())
+        let r1 = s1.scan()
+        XCTAssertEqual(perms(cacheURL), 0o600)
+        XCTAssertEqual(perms(cacheURL.deletingLastPathComponent()), 0o700)
+        let file = GeminiUsageCacheFile.load(cacheURL)!
+        XCTAssertEqual(file.version, 1)
+        XCTAssertEqual(file.entries.count, 3)                                    // 读取失败的不进缓存
+        XCTAssertFalse(file.entries.keys.contains { $0.hasSuffix("bad.db") })
+        XCTAssertEqual(file.entries.first { $0.key.hasSuffix("/a.db") }?.value.walSize, 0)
+        XCTAssertEqual(file.entries.first { $0.key.hasSuffix("/a.db") }?.value.walMtime, 0)
+        let text = String(data: try Data(contentsOf: cacheURL), encoding: .utf8)!
+        XCTAssertFalse(text.contains("last_step_index"))
+
+        // 新的扫描器（模拟重启）：先用缓存立即出图，扫描时没变的 0 复制 0 打开（失败的库重试）
+        let s2 = GeminiHistoryScanner(home: home, cacheURL: cacheURL, calendar: utc)
+        let cached = s2.loadDiskCache()!
+        XCTAssertEqual(cached.daily, r1.daily)
+        let r2 = s2.scan()
+        XCTAssertEqual(r2, r1)
+        XCTAssertEqual(s2.copyCount, 1); XCTAssertEqual(s2.openCount, 1)       // 只有 bad.db 重试
+        let mtime = try FileManager.default.attributesOfItem(atPath: cacheURL.path)[.modificationDate] as? Date
+
+        // 删掉 bad：再扫 0 复制 0 打开，缓存内容没变不重写
+        try FileManager.default.removeItem(at: dir("antigravity-cli").appendingPathComponent("bad.db"))
+        let s3 = GeminiHistoryScanner(home: home, cacheURL: cacheURL, calendar: utc)
+        let r3 = s3.scan()
+        XCTAssertEqual(s3.copyCount, 0); XCTAssertEqual(s3.openCount, 0)
+        XCTAssertEqual(r3.failed, 0)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: cacheURL.path)[.modificationDate] as? Date, mtime)
+
+        // 改一个库只重读那一个；删掉一个库从缓存和结果里消失
+        let a = dir("antigravity").appendingPathComponent("a.db")
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 30)], ofItemAtPath: a.path)
+        try FileManager.default.removeItem(at: dir("antigravity").appendingPathComponent("fb.db"))
+        let s4 = GeminiHistoryScanner(home: home, cacheURL: cacheURL, calendar: utc)
+        let r4 = s4.scan()
+        XCTAssertEqual(s4.openCount, 1)
+        XCTAssertEqual(r4.conversations, 2)
+        XCTAssertNil(r4.daily["2026-11-20"])
+        XCTAssertEqual(GeminiUsageCacheFile.load(cacheURL)!.entries.count, 2)
+        XCTAssertFalse(GeminiUsageCacheFile.load(cacheURL)!.entries.keys.contains { $0.hasSuffix("fb.db") })
+        // 没有残留临时文件
+        let names = try FileManager.default.contentsOfDirectory(atPath: cacheURL.deletingLastPathComponent().path)
+        XCTAssertEqual(names, ["gemini-usage-cache.json"])
+    }
+
+    func testBadCacheFilesMeanNoCache() throws {
+        makeSet()
+        let expected = GeminiHistoryScanner(home: home, calendar: utc).scan()
+        let bad: [Data?] = [Data("{not json".utf8),
+                            Data(#"{"version":2,"entries":{}}"#.utf8),
+                            Data(#"{"version":1}"#.utf8),
+                            nil]
+        for b in bad {
+            try? FileManager.default.removeItem(at: cacheURL)
+            if let b = b {
+                try FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try b.write(to: cacheURL)
+            }
+            let s = GeminiHistoryScanner(home: home, cacheURL: cacheURL, calendar: utc)
+            XCTAssertNil(s.loadDiskCache())
+            XCTAssertEqual(s.scan(), expected)
+            XCTAssertEqual(s.openCount, 4)                                         // 从头扫描
+            XCTAssertEqual(GeminiUsageCacheFile.load(cacheURL)?.entries.count, 3)  // 覆盖写
+            XCTAssertEqual(perms(cacheURL), 0o600)
+        }
+    }
+
+    func testCachedStartTiming() {
+        // 合成 40 个库、每库 300 步，测一次完整扫描和有缓存的重扫。
+        for i in 0..<40 {
+            makeDB("antigravity", "t\(i)", steps: (0..<300).map { j in
+                PB.u(2, 1) + PB.bytes(3, Data(repeating: 7, count: 2000)) + PB.step(at: d1.addingTimeInterval(Double(j) * 600), usage: PB.usage(input: 100, output: 5, cr: 30))
+            })
+        }
+        let s = GeminiHistoryScanner(home: home, cacheURL: cacheURL, calendar: utc)
+        let full = s.scan()
+        let t = s.lastTimings
+        let s2 = GeminiHistoryScanner(home: home, cacheURL: cacheURL, calendar: utc)
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let cached = s2.loadDiskCache()
+        let tLoad = CFAbsoluteTimeGetCurrent() - t0
+        _ = s2.scan()
+        print(String(format: "GEMINI_SCAN_TIMING dbs=40 rows=12000 full=%.3fs copy=%.3fs sqlite=%.3fs decode=%.3fs cache_load=%.4fs cached_rescan=%.4fs",
+                     t.total, t.copy, t.sqlite, t.decode, tLoad, s2.lastTimings.total))
+        XCTAssertEqual(cached?.daily, full.daily)
+        XCTAssertEqual(s2.openCount, 0)
+        XCTAssertLessThan(tLoad, 1)
     }
 }
 #endif

@@ -45,7 +45,7 @@ jobs:
           set -uo pipefail
           TZ=UTC swift test 2>&1 | tee /tmp/tests.log
           status=${PIPESTATUS[0]}
-          grep -E '^MENUBAR_WIDTH' /tmp/tests.log | sed 's/^/RELEASE: /' || true
+          grep -E '^(MENUBAR_WIDTH|GEMINI_SCAN_TIMING)' /tmp/tests.log | sed 's/^/RELEASE: /' || true
           echo "RELEASE: $(grep -E 'Executed [0-9]+ tests' /tmp/tests.log | tail -n 1)"
           exit "$status"
 

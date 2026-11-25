@@ -31,6 +31,13 @@ public enum Fmt {
         return "\(n)"
     }
 
+    /// 用量图纵轴刻度（契约 0.1.5 §3）：≥1 亿「x.xx亿」，≥1000 万不带小数「4450万」，其余同 tokens。
+    public static func axisTokens(_ n: Int64) -> String {
+        if n >= 100_000_000 { return tokens(n) }
+        if n >= 10_000_000 { return "\(Int64((Double(n) / 10_000).rounded()))万" }
+        return tokens(n)
+    }
+
     /// 倒计时：X天X小时 / X小时X分 / X分。
     public static func countdown(from now: Date, to end: Date) -> String {
         let s = max(0, Int(end.timeIntervalSince(now)))

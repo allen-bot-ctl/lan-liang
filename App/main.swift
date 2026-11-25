@@ -45,6 +45,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     #endif
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        // 诊断：在本机实测 Gemini 历史扫描三段用时（只打印数字，不打印路径以外的任何内容），然后退出。
+        if args.contains("--debug-gemini-scan-timing") {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let home = FileManager.default.homeDirectoryForCurrentUser
+                let tmpCache = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("lanliang-timing-\(UUID().uuidString).json")
+                defer { try? FileManager.default.removeItem(at: tmpCache) }
+                let s1 = GeminiHistoryScanner(home: home, cacheURL: tmpCache)
+                let r = s1.scan(); let t = s1.lastTimings
+                print(String(format: "GEMINI_SCAN_TIMING first: total=%.3fs copy=%.3fs sqlite=%.3fs decode=%.3fs dbs=%d failed=%d opened=%d",
+                             t.total, t.copy, t.sqlite, t.decode, r.conversations, r.failed, s1.openCount))
+                let s2 = GeminiHistoryScanner(home: home, cacheURL: tmpCache)
+                let t0 = CFAbsoluteTimeGetCurrent()
+                _ = s2.loadDiskCache()
+                let load = CFAbsoluteTimeGetCurrent() - t0
+                _ = s2.scan()
+                print(String(format: "GEMINI_SCAN_TIMING cached: load=%.4fs rescan=%.4fs opened=%d", load, s2.lastTimings.total, s2.openCount))
+                fflush(stdout)
+                exit(0)
+            }
+            return
+        }
         if let a = argValue("debug-appearance") {
             NSApp.appearance = NSAppearance(named: a == "light" ? .aqua : .darkAqua)
         }

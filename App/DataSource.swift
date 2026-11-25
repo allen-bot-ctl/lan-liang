@@ -93,17 +93,28 @@ final class LiveSource: DataSource {
     func loadSync(into model: PanelModel) {}
     func allowKeychainAgain() { gemini.allowKeychainAgain() }
 
-    private let historyQueue = DispatchQueue(label: "lanliang.gemini-history", qos: .utility)
-    private lazy var historyScanner = GeminiHistoryScanner(home: FileManager.default.homeDirectoryForCurrentUser)
+    /// 扫描受 QoS 影响很大（老板 Mac：后台 QoS 下 SQLite 读取 20.9 秒，正常 1.5 秒），用 userInitiated。
+    private let historyQueue = DispatchQueue(label: "lanliang.gemini-history", qos: .userInitiated)
+    private lazy var historyScanner: GeminiHistoryScanner = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return GeminiHistoryScanner(home: home, cacheURL: GeminiUsageCacheFile.url(home: home))
+    }()
     /// 只在主线程读写。
     private var historyBusy = false
+    private var historyStarted = false
 
     func refreshGeminiHistory(completion: @escaping (GeminiHistory) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !historyBusy else { return }
         historyBusy = true
+        let first = !historyStarted
+        historyStarted = true
         historyQueue.async { [weak self] in
             guard let self = self else { return }
+            // 启动时先用磁盘缓存立即出图，再扫描变过的对话。
+            if first, let cached = self.historyScanner.loadDiskCache() {
+                DispatchQueue.main.async { completion(cached) }
+            }
             let r = self.historyScanner.scan()
             DispatchQueue.main.async {
                 self.historyBusy = false
@@ -111,6 +122,7 @@ final class LiveSource: DataSource {
             }
         }
     }
+
 }
 
 // MARK: Codex
