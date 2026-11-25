@@ -152,16 +152,17 @@ struct TokenChartSection: View {
         let active = hover ?? (model.hoverKey == "auto" ? bars.max(by: { $0.value < $1.value })?.key : model.hoverKey)
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: service == .codex ? nil : 4) {
-                Text("Token 用量").font(.system(size: 14, weight: .semibold))
-                if official == nil { Text("仅本机").font(.system(size: 11)).foregroundColor(.secondary) }
-                if service == .gemini, case let .chart(failed)? = model.geminiHistory?.display, failed > 0 {
-                    Text("· \(failed) 个对话读取失败").font(.system(size: 11)).foregroundColor(.secondary)
+                Text("Token 用量").font(.system(size: 14, weight: .semibold)).lineLimit(1).fixedSize()
+                if official == nil { Text("仅本机").font(.system(size: 11)).foregroundColor(.secondary).lineLimit(1).fixedSize() }
+                if failedCount > 0 {
+                    Text("· \(failedCount) 个对话读取失败").font(.system(size: 11)).foregroundColor(.secondary)
+                        .lineLimit(1).fixedSize()
                 }
                 Spacer()
                 Picker("", selection: $model.range) {
                     ForEach(TokenRange.allCases, id: \.self) { r in Text(r.title).tag(r) }
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 150)
+                .pickerStyle(.segmented).labelsHidden().frame(width: failedCount > 0 ? 108 : 150)
             }
             if let st = geminiStatus {
                 Text(st.text).font(.system(size: 12)).foregroundColor(st.isError ? .red : .secondary)
@@ -172,6 +173,12 @@ struct TokenChartSection: View {
                 .frame(height: 150)
             }
         }
+    }
+
+    /// 部分对话读取失败的个数（只有 Gemini 画图时才有）；有时把区间切换收窄，让标题行一行放下。
+    var failedCount: Int {
+        guard service == .gemini, case let .chart(failed)? = model.geminiHistory?.display else { return 0 }
+        return failed
     }
 
     /// Gemini 图区的状态文案（契约 0.1.4 §4）；nil = 画图。
@@ -245,6 +252,7 @@ struct BarChart: View {
                         .stroke(Color.secondary.opacity(0.2), lineWidth: 0.5)
                     Text(Fmt.tokens(Int64(Double(maxV) * f)))
                         .font(.system(size: 9)).foregroundColor(.secondary)
+                        .lineLimit(1).minimumScaleFactor(0.6)
                         .frame(width: axisWidth - 4, alignment: .trailing)
                         .position(x: (axisWidth - 4) / 2, y: min(max(y, 6), plotH - 6))
                 }
