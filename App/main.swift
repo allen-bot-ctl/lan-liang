@@ -301,7 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         m.rootView = PanelView(model: model, fill: false)
         let s = m.sizeThatFits(in: NSSize(width: 400, height: 4000))
         // 高度上限：屏幕可见高度减边距（截图用 --debug-max-height 压低）；超过就在面板里滚动。
-        var cap = ((panel?.screen ?? NSScreen.main)?.visibleFrame.height ?? 800) - 16
+        var cap = ((panel?.screen ?? NSScreen.main)?.visibleFrame.height ?? 800) - 40
         if let d = argValue("debug-max-height").flatMap({ Double($0) }) { cap = CGFloat(d) }
         return NSSize(width: 400, height: min(ceil(s.height), cap))
     }
