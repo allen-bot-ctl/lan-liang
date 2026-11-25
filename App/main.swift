@@ -300,7 +300,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let m = measurer else { return NSSize(width: 400, height: 300) }
         m.rootView = PanelView(model: model, fill: false)
         let s = m.sizeThatFits(in: NSSize(width: 400, height: 4000))
-        return NSSize(width: 400, height: ceil(s.height))
+        // 高度上限：屏幕可见高度减边距（截图用 --debug-max-height 压低）；超过就在面板里滚动。
+        var cap = ((panel?.screen ?? NSScreen.main)?.visibleFrame.height ?? 800) - 16
+        if let d = argValue("debug-max-height").flatMap({ Double($0) }) { cap = CGFloat(d) }
+        return NSSize(width: 400, height: min(ceil(s.height), cap))
     }
 
     /// 截图用：来回切页签 n 次，每次检查面板顶边、内容视图和窗口是否一致，最后打印截图区域。

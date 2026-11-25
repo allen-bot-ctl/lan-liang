@@ -97,6 +97,8 @@ for ap in dark light; do
     grep -q " topsUnique=1 " <<<"$l" && grep -q " mismatches=0$" <<<"$l" \
       || { echo "::error::切页签后面板顶边或内容错位: $l"; exit 1; }
   done
+  # 内容超过高度上限时在面板里滚动（压低上限到 300pt）。
+  LANLIANG_FAKE="$PWD/fixtures/normal.json" shoot "-scroll-capped-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=gemini --debug-max-height=300 --debug-tab-flip=20
 done
 # 带旧偏好升级（契约 0.1.3 §1）：预置旧版本留下的 Item-0 隐藏偏好（以及新名字也被藏），启动后状态项必须可见。
 for ap in dark light; do

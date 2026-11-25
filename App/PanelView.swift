@@ -41,22 +41,34 @@ struct PanelView: View {
         VStack(alignment: .leading, spacing: 0) {
             HeaderBar(model: model).zIndex(2)
             ServiceTabs(model: model).padding(.horizontal, 12)
-            VStack(alignment: .leading, spacing: 8) {
-                ServiceSection(service: model.tab, snap: model.snapshot(model.tab), now: model.now(),
-                               onReauthorize: model.onReauthorizeKeychain)
-                if model.tab == .codex, model.codex.status != .notLoggedIn, model.codex.status != .apiKeyOnly {
-                    TokenChartSection(model: model, service: .codex)
-                }
-                if model.tab == .gemini {
-                    // 本机数据不依赖登录：选中 Gemini 页签就显示。
-                    TokenChartSection(model: model, service: .gemini)
-                }
+            if fill {
+                // 顶栏和页签固定，下面的内容可以纵向滚动（以后加区块时超过屏幕高度就出滚动条）；
+                // 每次切页签按页签重建，滚动位置回到顶部。
+                ScrollView(.vertical, showsIndicators: true) { sections }
+                    .id(model.tab)
+            } else {
+                sections
             }
-            .padding(12)
         }
         .frame(width: 400)
         .frame(maxHeight: fill ? .infinity : nil, alignment: .top)
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(th.panelStroke, lineWidth: 0.5))
+    }
+
+    var sections: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ServiceSection(service: model.tab, snap: model.snapshot(model.tab), now: model.now(),
+                           onReauthorize: model.onReauthorizeKeychain)
+            if model.tab == .codex, model.codex.status != .notLoggedIn, model.codex.status != .apiKeyOnly {
+                TokenChartSection(model: model, service: .codex)
+            }
+            if model.tab == .gemini {
+                // 本机数据不依赖登录：选中 Gemini 页签就显示。
+                TokenChartSection(model: model, service: .gemini)
+            }
+        }
+        .padding(12)
+        .frame(width: 400, alignment: .leading)
     }
 }
 
