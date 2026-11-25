@@ -907,7 +907,12 @@ final class AxisTickTests: XCTestCase {
         XCTAssertEqual(Fmt.tokens(15_000), "1.50万")
         XCTAssertEqual(Fmt.tokens(10_000), "1万")
         XCTAssertEqual(Fmt.tokens(9_999), "9999")
-        XCTAssertEqual(Fmt.tokens(99_999_999), "9999.99万")
+        // 四舍五入到 10000万 时进位成「亿」
+        XCTAssertEqual(Fmt.tokens(99_999_999), "1亿")
+        XCTAssertEqual(Fmt.tokens(99_999_500), "9999.95万")
+        XCTAssertEqual(Fmt.axisTokens(99_999_999), "1.00亿")
+        XCTAssertEqual(Fmt.axisTokens(99_995_000), "1.00亿")
+        XCTAssertEqual(Fmt.axisTokens(99_994_999), "9999万")
         XCTAssertEqual(Fmt.axisTokens(21_000_000), Fmt.tokens(21_000_000))
         XCTAssertEqual(Fmt.tokens(335_000_000), "3.35亿")
     }

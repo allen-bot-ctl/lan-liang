@@ -29,14 +29,24 @@ public enum Fmt {
     public static func tokens(_ n: Int64) -> String {
         func trim(_ s: String) -> String { s.hasSuffix(".00") ? String(s.dropLast(3)) : s }
         if n >= 100_000_000 { return trim(String(format: "%.2f", Double(n) / 100_000_000)) + "亿" }
-        if n >= 10_000 { return trim(String(format: "%.2f", Double(n) / 10_000)) + "万" }
+        if n >= 10_000 {
+            let w = String(format: "%.2f", Double(n) / 10_000)
+            // 四舍五入后到了 10000万（如 99_999_999），进位成「亿」：「1亿」，不写「10000万」。
+            if (Double(w) ?? 0) >= 10_000 { return trim(String(format: "%.2f", Double(n) / 100_000_000)) + "亿" }
+            return trim(w) + "万"
+        }
         return "\(n)"
     }
 
     /// 用量图纵轴刻度（契约 0.1.5 §3）：≥1 亿「x.xx亿」，≥1000 万不带小数「4450万」，其余同 tokens。
     public static func axisTokens(_ n: Int64) -> String {
         if n >= 100_000_000 { return String(format: "%.2f亿", Double(n) / 100_000_000) }   // 刻度规则不变（0.3.2）
-        if n >= 10_000_000 { return "\(Int64((Double(n) / 10_000).rounded()))万" }
+        if n >= 10_000_000 {
+            let w = Int64((Double(n) / 10_000).rounded())
+            // 取整后到了 10000万，进位成「亿」，按刻度的亿格式写「1.00亿」。
+            if w >= 10_000 { return String(format: "%.2f亿", Double(n) / 100_000_000) }
+            return "\(w)万"
+        }
         return tokens(n)
     }
 
