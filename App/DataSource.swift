@@ -107,10 +107,12 @@ final class CodexLive {
             return Output(snapshot: .init(status: .apiKeyOnly), official: nil, local: local)
         case let .oauth(access, idToken, accountID):
             let acct = idToken.flatMap { CodexAccount.from(idToken: $0) }
+            // 套餐先用 id_token 的，wham/usage 成功后换成实时 plan_type；日期缺失时用 access_token 的同名字段。
             var snap = ServiceSnapshot(status: .ok, email: acct?.email,
                                        plan: acct?.planRaw.map { Fmt.codexPlanName($0) },
-                                       subscriptionUntil: acct?.subscriptionUntil,
-                                       weekly: previous.weekly, fiveHour: previous.fiveHour)
+                                       subscriptionUntil: acct?.subscriptionUntil ?? CodexAccount.subscriptionUntil(jwt: access),
+                                       weekly: previous.weekly, fiveHour: previous.fiveHour,
+                                       planRaw: acct?.planRaw, planIsLive: false)
             func request(_ path: String) -> URLRequest {
                 var r = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/" + path)!)
                 r.setValue("Bearer " + access, forHTTPHeaderField: "Authorization")
@@ -124,7 +126,11 @@ final class CodexLive {
                 if let u = CodexUsage.parse(d) {
                     snap.weekly = u.weekly
                     snap.fiveHour = u.fiveHour
-                    if snap.plan == nil, let p = u.planRaw { snap.plan = Fmt.codexPlanName(p) }
+                    if let p = u.planRaw, !p.isEmpty {
+                        snap.plan = Fmt.codexPlanName(p)
+                        snap.planRaw = p
+                        snap.planIsLive = true
+                    }
                 } else {
                     snap.status = .fetchFailed
                 }

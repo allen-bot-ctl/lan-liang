@@ -70,12 +70,11 @@ struct ServiceSection: View {
                     Spacer()
                 }
             }
-            if service == .codex, let until = snap.subscriptionUntil, snap.status != .notLoggedIn {
-                if until <= now {
-                    Text("订阅已过期").font(.system(size: 12)).foregroundColor(.red)
-                } else {
-                    Text("订阅有效期至 \(Fmt.day(until)) · \(Fmt.countdown(from: now, to: until))")
-                        .font(.system(size: 12)).foregroundColor(.green)
+            if service == .codex, snap.status != .notLoggedIn, snap.status != .apiKeyOnly {
+                let line = CodexSubscription.line(raw: snap.subscriptionUntil, planRaw: snap.planRaw,
+                                                  planIsLive: snap.planIsLive ?? false, now: now)
+                if let t = CodexSubscription.text(line) {
+                    Text(t).font(.system(size: 12)).foregroundColor(line == .expired ? .red : .green)
                 }
             }
             if let w = snap.weekly { QuotaRow(title: "周剩余", window: w, now: now) }

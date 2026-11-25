@@ -50,12 +50,18 @@ public struct ServiceSnapshot: Codable, Equatable {
     public var email: String?
     public var plan: String?
     public var subscriptionUntil: Date?
+    /// 套餐原始值（Codex：实时 plan_type 优先，否则 id_token）；判断付费档用。
+    public var planRaw: String?
+    /// planRaw 是否来自实时 wham/usage。
+    public var planIsLive: Bool?
     public var weekly: QuotaWindow?
     public var fiveHour: QuotaWindow?
 
     public init(status: ServiceStatus, email: String? = nil, plan: String? = nil, subscriptionUntil: Date? = nil,
-                weekly: QuotaWindow? = nil, fiveHour: QuotaWindow? = nil) {
+                weekly: QuotaWindow? = nil, fiveHour: QuotaWindow? = nil,
+                planRaw: String? = nil, planIsLive: Bool? = nil) {
         self.status = status; self.email = email; self.plan = plan
+        self.planRaw = planRaw; self.planIsLive = planIsLive
         self.subscriptionUntil = subscriptionUntil; self.weekly = weekly; self.fiveHour = fiveHour
     }
 
@@ -77,7 +83,7 @@ public struct ServiceSnapshot: Codable, Equatable {
     }
 }
 
-/// 菜单栏一组的文字：nil 表示整组不显示。
+/// 菜单栏一行的文字：nil 表示这一行不显示。
 public struct MenuBarGroup: Equatable {
     public var service: Service
     public var primary: String
@@ -86,6 +92,13 @@ public struct MenuBarGroup: Equatable {
 
 public enum MenuBarText {
     public static func percent(_ v: Double) -> String { "\(Int(v.rounded()))%" }
+    /// 5 小时剩余：只写数字，不带 %（契约 0.1.2 §2）。
+    public static func number(_ v: Double) -> String { "\(Int(v.rounded()))" }
+
+    /// 菜单栏要显示的行：上 Codex 下 Gemini；空数组 = 只显示栏量图标。
+    public static func rows(codex: ServiceSnapshot, gemini: ServiceSnapshot) -> [MenuBarGroup] {
+        [group(for: .codex, snapshot: codex), group(for: .gemini, snapshot: gemini)].compactMap { $0 }
+    }
 
     public static func group(for service: Service, snapshot s: ServiceSnapshot) -> MenuBarGroup? {
         switch s.status {
@@ -99,7 +112,7 @@ public enum MenuBarText {
             }
             if let w = s.weekly {
                 return MenuBarGroup(service: service, primary: percent(w.remainingPercent),
-                                    secondary: s.fiveHour.map { percent($0.remainingPercent) })
+                                    secondary: s.fiveHour.map { number($0.remainingPercent) })
             }
             return MenuBarGroup(service: service, primary: percent(s.fiveHour!.remainingPercent), secondary: nil)
         }

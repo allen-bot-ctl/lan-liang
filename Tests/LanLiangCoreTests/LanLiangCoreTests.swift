@@ -13,7 +13,7 @@ final class LanLiangCoreTests: XCTestCase {
         let f = QuotaWindow(kind: .fiveHour, remainingPercent: 64, resetsAt: nil)
         XCTAssertEqual(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .ok, weekly: w)),
                        MenuBarGroup(service: .codex, primary: "77%", secondary: nil))
-        XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: ServiceSnapshot(status: .ok, weekly: w, fiveHour: f))?.secondary, "64%")
+        XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: ServiceSnapshot(status: .ok, weekly: w, fiveHour: f))?.secondary, "64")
         XCTAssertNil(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .notLoggedIn)))
         XCTAssertNil(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .apiKeyOnly)))
         XCTAssertNil(MenuBarText.group(for: .gemini, snapshot: ServiceSnapshot(status: .keychainDenied)))
@@ -250,4 +250,169 @@ final class GeminiRefreshTests: XCTestCase {
         XCTAssertEqual(GeminiTokenRefresh.parse(Data(#"{"access_token":"a"}"#.utf8), now: now)?.expiry, Date(timeIntervalSince1970: 3_600))
         XCTAssertNil(GeminiTokenRefresh.parse(Data("{}".utf8), now: now))
     }
+}
+
+final class V012Tests: XCTestCase {
+    func data(_ s: String) -> Data { Data(s.utf8) }
+
+    // MARK: 0.1.2 订阅有效期
+
+    private func utc(_ s: String) -> Date { parseFlexibleDate(s)! }
+
+    func testSubscriptionTier() {
+        for p in ["plus", "prolite", "pro-lite", "pro", "PRO", "promax", "pro-max", "team", "chatgpt_business", "enterprise", "edu"] {
+            XCTAssertEqual(CodexSubscription.tier(p), .paid, p)
+        }
+        XCTAssertEqual(CodexSubscription.tier("free"), .free)
+        XCTAssertEqual(CodexSubscription.tier(nil), .unknown)
+        XCTAssertEqual(CodexSubscription.tier(""), .unknown)
+        XCTAssertEqual(CodexSubscription.tier("guest"), .unknown)
+    }
+
+    func testPaidPastDateRollsToCurrentPeriod() {
+        // 老板的 Pro 200：id_token 日期 10/12 已过去，推到 12/12。
+        let now = utc("2026-11-24T19:00:00Z")
+        let line = CodexSubscription.line(raw: utc("2026-10-12T08:00:00Z"), planRaw: "pro", planIsLive: true, now: now)
+        XCTAssertEqual(line, .active(until: utc("2026-12-12T08:00:00Z"), daysLeft: 17))
+        XCTAssertEqual(CodexSubscription.text(line, timeZone: TimeZone(identifier: "UTC")!), "订阅有效期至 2026/12/12 · 剩 17 天")
+    }
+
+    func testRollMonthEndClamp() {
+        // 1/31 → 2/28（平年）、2/29（闰年）；锚定原始日，3 月回到 31 日。
+        XCTAssertEqual(CodexSubscription.currentPeriodEnd(raw: utc("2027-01-31T10:00:00Z"), now: utc("2027-02-01T00:00:00Z")),
+                       utc("2027-02-28T10:00:00Z"))
+        XCTAssertEqual(CodexSubscription.currentPeriodEnd(raw: utc("2028-01-31T10:00:00Z"), now: utc("2028-02-01T00:00:00Z")),
+                       utc("2028-02-29T10:00:00Z"))
+        XCTAssertEqual(CodexSubscription.currentPeriodEnd(raw: utc("2027-01-31T10:00:00Z"), now: utc("2027-03-01T00:00:00Z")),
+                       utc("2027-03-31T10:00:00Z"))
+        XCTAssertEqual(CodexSubscription.currentPeriodEnd(raw: utc("2026-08-31T00:00:00Z"), now: utc("2026-09-15T00:00:00Z")),
+                       utc("2026-09-30T00:00:00Z"))
+    }
+
+    func testRollAcrossYear() {
+        XCTAssertEqual(CodexSubscription.currentPeriodEnd(raw: utc("2026-11-15T08:00:00Z"), now: utc("2026-12-20T00:00:00Z")),
+                       utc("2027-01-15T08:00:00Z"))
+        // 正好等于周期末不算「晚于现在」，推到下一个。
+        XCTAssertEqual(CodexSubscription.currentPeriodEnd(raw: utc("2026-10-12T08:00:00Z"), now: utc("2026-11-12T08:00:00Z")),
+                       utc("2026-12-12T08:00:00Z"))
+    }
+
+    func testRollGivesUpAfter48Months() {
+        XCTAssertNil(CodexSubscription.currentPeriodEnd(raw: utc("2020-01-01T00:00:00Z"), now: utc("2026-11-24T00:00:00Z")))
+        XCTAssertEqual(CodexSubscription.line(raw: utc("2020-01-01T00:00:00Z"), planRaw: "pro", planIsLive: true,
+                                              now: utc("2026-11-24T00:00:00Z")), .hidden)
+    }
+
+    func testPaidFutureDateUnchanged() {
+        let now = utc("2026-11-24T19:00:00Z")
+        XCTAssertEqual(CodexSubscription.line(raw: utc("2026-12-12T08:00:00Z"), planRaw: "plus", planIsLive: true, now: now),
+                       .active(until: utc("2026-12-12T08:00:00Z"), daysLeft: 17))
+    }
+
+    func testLessThanOneDay() {
+        let now = utc("2026-11-24T19:00:00Z")
+        let line = CodexSubscription.line(raw: utc("2026-11-25T02:10:00Z"), planRaw: "pro", planIsLive: true, now: now)
+        XCTAssertEqual(line, .active(until: utc("2026-11-25T02:10:00Z"), daysLeft: 0))
+        XCTAssertEqual(CodexSubscription.text(line, timeZone: TimeZone(identifier: "UTC")!), "订阅有效期至 2026/11/25 · 剩不到 1 天")
+    }
+
+    func testFreeLivePastIsExpired() {
+        let line = CodexSubscription.line(raw: utc("2026-11-20T00:00:00Z"), planRaw: "free", planIsLive: true,
+                                          now: utc("2026-11-24T19:00:00Z"))
+        XCTAssertEqual(line, .expired)
+        XCTAssertEqual(CodexSubscription.text(line), "订阅已过期")
+    }
+
+    func testUnsureNeverExpired() {
+        let now = utc("2026-11-24T19:00:00Z"), past = utc("2026-11-20T00:00:00Z")
+        // 接口失败、id_token 说 free：拿不准，不显示。
+        XCTAssertEqual(CodexSubscription.line(raw: past, planRaw: "free", planIsLive: false, now: now), .hidden)
+        // 套餐未知（接口失败且 id_token 没套餐，或不认识的套餐）：日期已过去不显示。
+        XCTAssertEqual(CodexSubscription.line(raw: past, planRaw: nil, planIsLive: false, now: now), .hidden)
+        XCTAssertEqual(CodexSubscription.line(raw: past, planRaw: "mystery", planIsLive: true, now: now), .hidden)
+        // 套餐未知但日期在未来：照常显示。
+        XCTAssertEqual(CodexSubscription.line(raw: utc("2026-12-12T08:00:00Z"), planRaw: nil, planIsLive: false, now: now),
+                       .active(until: utc("2026-12-12T08:00:00Z"), daysLeft: 17))
+        // 接口失败、id_token 是付费档：按付费档推算。
+        XCTAssertEqual(CodexSubscription.line(raw: utc("2026-10-12T08:00:00Z"), planRaw: "pro", planIsLive: false, now: now),
+                       .active(until: utc("2026-12-12T08:00:00Z"), daysLeft: 17))
+    }
+
+    func testNoDateHidden() {
+        let now = utc("2026-11-24T19:00:00Z")
+        for (p, live) in [("pro", true), ("free", true), ("free", false)] {
+            XCTAssertEqual(CodexSubscription.line(raw: nil, planRaw: p, planIsLive: live, now: now), .hidden)
+        }
+        XCTAssertNil(CodexSubscription.text(.hidden))
+    }
+
+    func testAccessTokenSubscriptionFallback() {
+        func seg(_ o: [String: Any]) -> String {
+            try! JSONSerialization.data(withJSONObject: o).base64EncodedString()
+                .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        }
+        let jwt = seg(["alg": "none"]) + "." + seg(["https://api.openai.com/auth": ["chatgpt_subscription_active_until": 1797062400]]) + ".x"
+        XCTAssertEqual(CodexAccount.subscriptionUntil(jwt: jwt), Date(timeIntervalSince1970: 1797062400))
+    }
+
+    func testFakeSnapshotDecodesPlanFields() throws {
+        let j = #"{"status":"ok","plan":"Pro 200","planRaw":"pro","planIsLive":true}"#
+        let s = try JSONDecoder().decode(ServiceSnapshot.self, from: data(j))
+        XCTAssertEqual(s.planRaw, "pro"); XCTAssertEqual(s.planIsLive, true)
+        let old = try JSONDecoder().decode(ServiceSnapshot.self, from: data(#"{"status":"ok"}"#))
+        XCTAssertNil(old.planRaw)
+    }
+
+    // MARK: 0.1.2 菜单栏
+
+    func testMenuBarRows() {
+        let w = QuotaWindow(kind: .weekly, remainingPercent: 74, resetsAt: nil)
+        let f = QuotaWindow(kind: .fiveHour, remainingPercent: 64, resetsAt: nil)
+        let ok = ServiceSnapshot(status: .ok, weekly: w, fiveHour: f)
+        let off = ServiceSnapshot(status: .notLoggedIn)
+        XCTAssertEqual(MenuBarText.rows(codex: ok, gemini: ok).map { $0.service }, [.codex, .gemini])
+        XCTAssertEqual(MenuBarText.rows(codex: ok, gemini: ok).first?.secondary, "64")
+        XCTAssertEqual(MenuBarText.rows(codex: off, gemini: ok).map { $0.service }, [.gemini])
+        XCTAssertEqual(MenuBarText.rows(codex: ok, gemini: ServiceSnapshot(status: .keychainDenied)).map { $0.service }, [.codex])
+        XCTAssertTrue(MenuBarText.rows(codex: off, gemini: ServiceSnapshot(status: .apiKeyOnly)).isEmpty)
+    }
+
+    #if canImport(AppKit)
+    private func row(_ s: Service, _ p: String, _ f: String?) -> MenuBarGroup { MenuBarGroup(service: s, primary: p, secondary: f) }
+
+    func testMenuBarWidthLimits() {
+        let both5h = MenuBarLayout.width([row(.codex, "100%", "100"), row(.gemini, "100%", "100")])
+        let bothWeekly = MenuBarLayout.width([row(.codex, "100%", nil), row(.gemini, "100%", nil)])
+        print("MENUBAR_WIDTH two_rows_5h=\(both5h) two_rows_weekly=\(bothWeekly)")
+        XCTAssertLessThanOrEqual(both5h, 75)
+        XCTAssertLessThanOrEqual(bothWeekly, 55)
+        XCTAssertLessThan(bothWeekly, both5h)
+    }
+
+    func testMenuBarWidthStable() {
+        let a = MenuBarLayout.width([row(.codex, "9%", "5"), row(.gemini, "100%", nil)])
+        let b = MenuBarLayout.width([row(.codex, "100%", "100"), row(.gemini, "100%", "100")])
+        let c = MenuBarLayout.width([row(.codex, "--", nil), row(.gemini, "…", "64")])
+        XCTAssertEqual(a, b); XCTAssertEqual(b, c)
+        XCTAssertEqual(MenuBarLayout.width([row(.codex, "9%", nil)]), MenuBarLayout.width([row(.codex, "100%", nil)]))
+    }
+
+    func testSingleRowNoReservedSpace() {
+        let single = MenuBarLayout.width([row(.codex, "100%", nil)])
+        let single5h = MenuBarLayout.width([row(.gemini, "100%", "100")])
+        print("MENUBAR_WIDTH single_weekly=\(single) single_5h=\(single5h)")
+        XCTAssertLessThan(single, single5h)          // 没 5 小时不留空
+        XCTAssertEqual(MenuBarLayout.style(rowCount: 1).primaryFont.pointSize, 12)
+        XCTAssertEqual(MenuBarLayout.style(rowCount: 2).primaryFont.pointSize, 9.5)
+        XCTAssertEqual(MenuBarLayout.width([]), 0)
+        XCTAssertNil(MenuBarLayout.image([], height: 22))
+    }
+
+    func testMenuBarImageIsTemplate() {
+        let img = MenuBarLayout.image([row(.codex, "74%", "64"), row(.gemini, "100%", nil)], height: 22)
+        XCTAssertNotNil(img)
+        XCTAssertTrue(img!.isTemplate)
+        XCTAssertEqual(img!.size.height, 22)
+    }
+    #endif
 }

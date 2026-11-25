@@ -57,10 +57,10 @@ set_dark() {  # $1=true|false
 }
 CASES=(
   "normal codex daily" "normal codex weekly" "normal codex monthly" "normal gemini"
-  "codex-5h codex daily" "low codex daily" "low gemini"
-  "sub-lt1day codex daily" "sub-expired codex daily" "official-failed codex daily"
+  "codex-5h codex daily" "low codex daily" "low gemini" "max codex daily"
+  "sub-rolled codex daily" "sub-lt1day codex daily" "sub-expired codex daily" "official-failed codex daily"
   "failed codex daily" "failed gemini" "expired codex daily" "expired gemini" "keychain-denied gemini"
-  "both-weekly codex daily" "codex-only codex daily" "none codex daily"
+  "both-weekly codex daily" "codex-only codex daily" "gemini-only gemini" "none codex daily"
 )
 for ap in dark light; do
   if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
@@ -71,15 +71,39 @@ for ap in dark light; do
       --debug-tab=$tab ${range:+--debug-range=$range} --debug-hover=auto
   done
 done
-chk() { grep -h "^DEBUG_MENUBAR" "/tmp/shots--$1-dark.log" | grep -q "groups=$2\$" || { echo "::error::$1 菜单栏组不对"; exit 1; }; }
-chk normal-codex-daily 'codex:77%,gemini:44%+64%'
-chk both-weekly-codex-daily 'codex:77%,gemini:44%'
-chk codex-only-codex-daily 'codex:77%'
-chk none-codex-daily 'fallback'
-chk codex-5h-codex-daily 'codex:77%+36%,gemini:44%+64%'
-chk expired-codex-daily 'codex:--,gemini:--'
-chk keychain-denied-gemini 'codex:77%'
-chk low-codex-daily 'codex:8%+25%,gemini:25%+64%'
-chk failed-gemini 'codex:77%,gemini:--'
+# 菜单栏：唯一一个状态项、每行文字、内容宽度（契约 0.1.2 §2/§3）。
+mbline() { grep -h "^DEBUG_MENUBAR" "/tmp/shots--$1-$2.log" | tail -n 1; }
+field() { sed -E "s/.* $2=([^ ]+).*/\1/" <<<"$1"; }
+chk() {
+  for ap in dark light; do
+    l=$(mbline "$1" "$ap")
+    [ -n "$l" ] || { echo "::error::$1-$ap 没有 DEBUG_MENUBAR"; exit 1; }
+    [ "$(field "$l" items)" = 1 ] || { echo "::error::$1-$ap 状态项不是 1 个: $l"; exit 1; }
+    [ "$(field "$l" groups)" = "$2" ] || { echo "::error::$1-$ap 菜单栏行不对: $l（应为 $2）"; exit 1; }
+    [ "$(field "$l" rows)" = "$3" ] || { echo "::error::$1-$ap 行数不对: $l（应为 $3）"; exit 1; }
+  done
+}
+chk normal-codex-daily 'codex:77%,gemini:44%+64' 2
+chk both-weekly-codex-daily 'codex:77%,gemini:44%' 2
+chk codex-only-codex-daily 'codex:77%' 1
+chk gemini-only-gemini 'gemini:44%+64' 1
+chk none-codex-daily 'fallback' 0
+chk codex-5h-codex-daily 'codex:77%+36,gemini:44%+64' 2
+chk max-codex-daily 'codex:100%+100,gemini:100%+100' 2
+chk expired-codex-daily 'codex:--,gemini:--' 2
+chk keychain-denied-gemini 'codex:77%' 1
+chk low-codex-daily 'codex:8%+25,gemini:25%+64' 2
+chk failed-gemini 'codex:77%,gemini:--' 2
+lim() {  # $1=用例 $2=上限
+  w=$(field "$(mbline "$1" dark)" content)
+  echo "RELEASE: menubar content width $1=${w}pt (limit $2)"
+  python3 -c "import sys; sys.exit(0 if float('$w') <= $2 else 1)" || { echo "::error::$1 菜单栏宽 ${w}pt 超过 $2pt"; exit 1; }
+}
+lim max-codex-daily 75
+lim both-weekly-codex-daily 55
+# 数字从 8% 变到 100% 宽度不跳：同样的列（两行都有 5 小时）宽度必须相同。
+a=$(field "$(mbline low-codex-daily dark)" item); b=$(field "$(mbline max-codex-daily dark)" item); c=$(field "$(mbline codex-5h-codex-daily dark)" item)
+echo "RELEASE: item width low=$a max=$b codex-5h=$c"
+[ "$a" = "$b" ] && [ "$b" = "$c" ] || { echo "::error::数字变化时状态项宽度跳动"; exit 1; }
 grep -h "^DEBUG_" /tmp/shots-*.log | sed 's/^/RELEASE: /'
 ls -l shots

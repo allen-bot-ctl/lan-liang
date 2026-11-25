@@ -14,7 +14,9 @@
    "kind": "fiveHour",
    "remainingPercent": 25,
    "resetsAt": "2026-11-24T21:00:00Z"
-  }
+  },
+  "planRaw": "pro",
+  "planIsLive": true
  },
  "gemini": {
   "status": "ok",

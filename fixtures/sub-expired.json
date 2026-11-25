@@ -3,13 +3,15 @@
  "codex": {
   "status": "ok",
   "email": "allen@example.com",
-  "plan": "Pro 200",
+  "plan": "Free",
   "subscriptionUntil": "2026-11-20T00:00:00Z",
   "weekly": {
    "kind": "weekly",
    "remainingPercent": 77,
    "resetsAt": "2026-11-27T21:00:00Z"
-  }
+  },
+  "planRaw": "free",
+  "planIsLive": true
  },
  "gemini": {
   "status": "ok",

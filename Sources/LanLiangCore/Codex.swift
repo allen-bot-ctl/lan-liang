@@ -60,6 +60,12 @@ public struct CodexAccount: Equatable {
         self.email = email; self.planRaw = planRaw; self.subscriptionUntil = subscriptionUntil
     }
 
+    /// 只取 JWT 里的 chatgpt_subscription_active_until（给 access_token 兜底用）。
+    public static func subscriptionUntil(jwt: String) -> Date? {
+        guard let p = JWT.payload(jwt), let auth = p["https://api.openai.com/auth"] as? [String: Any] else { return nil }
+        return parseFlexibleDate(auth["chatgpt_subscription_active_until"])
+    }
+
     public static func from(idToken: String) -> CodexAccount? {
         guard let p = JWT.payload(idToken) else { return nil }
         let auth = p["https://api.openai.com/auth"] as? [String: Any] ?? [:]

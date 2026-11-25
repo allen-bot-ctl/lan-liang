@@ -22,8 +22,9 @@ func argValue(_ name: String) -> String? {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let model = PanelModel()
-    private var items: [Service: NSStatusItem] = [:]
-    private var fallbackItem: NSStatusItem!
+    /// 整个 app 唯一的状态项（契约 0.1.2 §2）。
+    private var statusItem: NSStatusItem!
+    private var statusItemCount = 0
     private var panel: FloatingPanel?
     private var host: NSHostingView<PanelView>?
     private var outsideMonitor: Any?
@@ -51,11 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.onRefresh = { [weak self] in self?.refresh() }
         model.onReauthorizeKeychain = { [weak self] in self?.source.allowKeychainAgain(); self?.refresh() }
 
-        // 先建的状态项在右边：栏量兜底图标 → Gemini → Codex（Codex 在最左）。
-        fallbackItem = makeItem(tag: -1)
-        fallbackItem.button?.image = symbol("chart.bar.fill", label: "栏量")
-        items[.gemini] = makeItem(tag: 1)
-        items[.codex] = makeItem(tag: 0)
+        statusItem = makeItem()
 
         loginItem.target = self
         contextMenu.delegate = self
@@ -73,9 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if args.contains("--debug-open-panel") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                let it: NSStatusItem? = [self.items[self.model.tab], self.items[.codex], self.items[.gemini]]
-                    .compactMap { $0 }.first { $0.isVisible } ?? self.fallbackItem
-                self.showPanel(from: it?.button)
+                self.showPanel(from: self.statusItem.button)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.printRects() }
             }
         }
@@ -83,14 +78,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: 菜单栏
 
-    private func makeItem(tag: Int) -> NSStatusItem {
+    private func makeItem() -> NSStatusItem {
         let it = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItemCount += 1
         if let b = it.button {
-            b.tag = tag
             b.target = self
             b.action = #selector(clicked(_:))
             b.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            b.imagePosition = .imageLeft
+            b.imagePosition = .imageOnly
+            b.title = ""
         }
         return it
     }
@@ -102,61 +98,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return img
     }
 
-    private let primaryFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-    private let secondaryFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-    private let iconSize: CGFloat = 16
+    /// 状态项两侧留白（点）；内容宽度见 MenuBarLayout.width。
+    private let itemPadding: CGFloat = 6
 
-    /// 菜单栏文字：周% 用 labelColor，5 小时% 用 secondaryLabelColor，系统按菜单栏外观自动着色。
-    private func title(primary: String, secondary: String?) -> NSAttributedString {
-        let t = NSMutableAttributedString(string: " " + primary, attributes: [
-            .font: primaryFont, .foregroundColor: NSColor.labelColor])
-        if let sec = secondary {
-            t.append(NSAttributedString(string: " " + sec, attributes: [
-                .font: secondaryFont, .foregroundColor: NSColor.secondaryLabelColor]))
-        }
-        return t
-    }
+    private var rows: [MenuBarGroup] { MenuBarText.rows(codex: model.codex, gemini: model.gemini) }
 
-    /// 定宽：有 5 小时窗口的组按「100% 100%」，只有周的组按「100%」（契约 §4）。
-    private func reservedWidth(hasSecondary: Bool) -> CGFloat {
-        iconSize + ceil(title(primary: "100%", secondary: hasSecondary ? "100%" : nil).size().width) + 6
-    }
-
-    /// 图标用模板图（跟随菜单栏深浅色）。
-    private func icon(for s: Service) -> NSImage? {
-        symbol(s == .codex ? "terminal" : "sparkle", label: s.title)
-    }
-
+    /// 两家都登录 → 上下两行；只登录一家 → 单行正常字号；都没登录 → 栏量图标。
     private func updateMenuBar() {
-        var anyShown = false
-        for s in Service.allCases {
-            guard let it = items[s], let b = it.button else { continue }
-            if let g = MenuBarText.group(for: s, snapshot: model.snapshot(s)) {
-                it.isVisible = true
-                b.image = icon(for: s)
-                b.imagePosition = .imageLeft
-                b.alignment = .left
-                b.attributedTitle = title(primary: g.primary, secondary: g.secondary)
-                it.length = reservedWidth(hasSecondary: g.secondary != nil)
-                anyShown = true
-            } else {
-                it.isVisible = false
-            }
+        guard let b = statusItem.button else { return }
+        let rs = rows
+        if let img = MenuBarLayout.image(rs, height: NSStatusBar.system.thickness) {
+            b.image = img
+            statusItem.length = ceil(MenuBarLayout.width(rs)) + itemPadding
+        } else {
+            b.image = symbol("chart.bar.fill", label: "栏量")
+            statusItem.length = NSStatusItem.variableLength
         }
-        fallbackItem.isVisible = !anyShown
     }
 
     @objc private func clicked(_ sender: NSButton) {
-        let item = sender.tag == 0 ? items[.codex] : sender.tag == 1 ? items[.gemini] : fallbackItem
         if NSApp.currentEvent?.type == .rightMouseUp {
             hidePanel()
-            item?.menu = contextMenu
-            item?.button?.performClick(nil)
-            item?.menu = nil
+            statusItem.menu = contextMenu
+            statusItem.button?.performClick(nil)
+            statusItem.menu = nil
             return
         }
         if panel?.isVisible == true { hidePanel(); return }
-        if sender.tag == 1 { model.tab = .gemini } else if sender.tag == 0 { model.tab = .codex }
+        // 默认停在上次的页签；当前页签那家没登录、另一家登录了，就切过去。
+        let shown = Set(rows.map { $0.service })
+        if !shown.contains(model.tab), let other = shown.first { model.tab = other }
         showPanel(from: sender)
         refresh()
     }
@@ -269,17 +240,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         func top(_ r: NSRect) -> String { "\(Int(r.minX)),\(Int(h - r.maxY)),\(Int(r.width)),\(Int(r.height))" }
         let mbh = NSStatusBar.system.thickness
         print("DEBUG_RECT_MENUBAR \(top(NSRect(x: 0, y: h - mbh, width: screen.frame.width, height: mbh)))")
-        var union: NSRect?
-        for it in [items[.codex], items[.gemini], fallbackItem] {
-            guard let it = it, it.isVisible, let b = it.button, let w = b.window else { continue }
+        var itemWidth = 0.0
+        if let b = statusItem.button, let w = b.window {
             let r = w.convertToScreen(b.convert(b.bounds, to: nil))
-            union = union.map { $0.union(r) } ?? r
+            itemWidth = r.width
+            print("DEBUG_RECT_ITEM \(top(r))")
         }
-        if let u = union { print("DEBUG_RECT_ITEM \(top(u))") }
         if let p = panel { print("DEBUG_RECT_PANEL \(top(p.frame))") }
-        let groups = Service.allCases.compactMap { s in MenuBarText.group(for: s, snapshot: model.snapshot(s)) }
-            .map { "\($0.service.rawValue):\($0.primary)\($0.secondary.map { "+" + $0 } ?? "")" }
-        print("DEBUG_MENUBAR groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ","))")
+        let rs = rows
+        let groups = rs.map { "\($0.service.rawValue):\($0.primary)\($0.secondary.map { "+" + $0 } ?? "")" }
+        let content = String(format: "%.1f", MenuBarLayout.width(rs))
+        print("DEBUG_MENUBAR items=\(statusItemCount) rows=\(rs.count) content=\(content) item=\(Int(itemWidth)) groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ","))")
         fflush(stdout)
     }
 }
