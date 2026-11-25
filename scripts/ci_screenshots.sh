@@ -75,14 +75,16 @@ done
 # 0.2.0 新状态（契约 0.2.0 验收 2）：加载态、升级红点+气泡、刷新悬停、设置窗口。
 for ap in dark light; do
   if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
-  f="$PWD/fixtures/normal.json"
-  LANLIANG_FAKE="$f" shoot "-v020-loading-codex-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=codex --debug-loading
-  LANLIANG_FAKE="$f" shoot "-v020-loading-gemini-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=gemini --debug-loading
-  LANLIANG_FAKE="$f" shoot "-v020-update-dot-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=codex \
+  nf="$PWD/fixtures/normal.json"
+  LANLIANG_FAKE="$nf" shoot "-v020-loading-codex-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=codex --debug-loading
+  LANLIANG_FAKE="$nf" shoot "-v020-loading-gemini-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=gemini --debug-loading
+  LANLIANG_FAKE="$nf" shoot "-v020-update-dot-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=codex \
     --debug-update=0.2.1 --debug-hover-button=update
-  LANLIANG_FAKE="$f" shoot "-v020-refresh-hover-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=gemini \
+  LANLIANG_FAKE="$nf" shoot "-v020-refresh-hover-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=gemini \
     --debug-hover-button=refresh
-  LANLIANG_FAKE="$f" shoot "-v020-settings-$ap" --debug-open-settings --debug-appearance=$ap --debug-update=0.2.1
+  LANLIANG_FAKE="$PWD/fixtures/longest.json" shoot "-v020-longest-codex-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=codex
+  LANLIANG_FAKE="$PWD/fixtures/longest.json" shoot "-v020-longest-gemini-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=gemini
+  LANLIANG_FAKE="$nf" shoot "-v020-settings-$ap" --debug-open-settings --debug-appearance=$ap --debug-update=0.2.1
 done
 # 带旧偏好升级（契约 0.1.3 §1）：预置旧版本留下的 Item-0 隐藏偏好（以及新名字也被藏），启动后状态项必须可见。
 for ap in dark light; do
