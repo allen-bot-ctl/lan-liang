@@ -16,7 +16,8 @@ struct RefreshHandlers {
 protocol DataSource: AnyObject {
     /// 模拟数据里固定的「现在」；真实数据为 nil。
     var fixedNow: Date? { get }
-    func refresh(current: (ServiceSnapshot, ServiceSnapshot), handlers: RefreshHandlers)
+    /// selection：关掉的服务不请求、不回调（契约 0.3.0 §1）。
+    func refresh(current: (ServiceSnapshot, ServiceSnapshot), selection: ServiceSelection, handlers: RefreshHandlers)
     func allowKeychainAgain()
     /// Gemini 本机 Token 历史：后台串行扫描，结果回主线程；扫描还在跑时不再新起。
     func refreshGeminiHistory(completion: @escaping (GeminiHistory) -> Void)
@@ -45,12 +46,12 @@ final class FakeSource: DataSource {
 
     var fixedNow: Date? { load()?.now }
 
-    func refresh(current: (ServiceSnapshot, ServiceSnapshot), handlers h: RefreshHandlers) {
+    func refresh(current: (ServiceSnapshot, ServiceSnapshot), selection: ServiceSelection, handlers h: RefreshHandlers) {
         let f = load()
         DispatchQueue.main.async {
-            h.onCodex(f?.codex ?? .init(status: .fetchFailed))
-            h.onGemini(f?.gemini ?? .init(status: .fetchFailed))
-            h.onCodexOfficial(f?.official)
+            if selection.codex { h.onCodex(f?.codex ?? .init(status: .fetchFailed)) }
+            if selection.gemini { h.onGemini(f?.gemini ?? .init(status: .fetchFailed)) }
+            if selection.codex { h.onCodexOfficial(f?.official) }
             h.onAllDone()
         }
     }
@@ -87,11 +88,12 @@ final class LiveSource: DataSource {
     var fixedNow: Date? { nil }
 
     /// 两家额度各自请求、各自显示；Codex 官方用量在额度之后再拉，不拖慢额度。
-    func refresh(current: (ServiceSnapshot, ServiceSnapshot), handlers h: RefreshHandlers) {
+    func refresh(current: (ServiceSnapshot, ServiceSnapshot), selection: ServiceSelection, handlers h: RefreshHandlers) {
         let codex = self.codex, gemini = self.gemini
         RefreshCoordinator.run(
             codex: { await codex.fetch(previous: current.0, onQuota: { s in DispatchQueue.main.async { h.onCodex(s) } }) },
             gemini: { await gemini.fetch(previous: current.1) },
+            selection: selection,
             onCodex: { official in h.onCodexOfficial(official) },
             onGemini: { s in h.onGemini(s) },
             onAllDone: { h.onAllDone() })

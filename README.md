@@ -6,6 +6,12 @@ macOS 菜单栏小工具：显示 Codex 与 Gemini（Google Antigravity 登录�
 - 只读：不改写 `~/.codex`、`~/.gemini` 或钥匙串里的任何东西。
 - 需求契约：`docs/changes/0.1.0.md`。
 
+## 设置窗口（0.3.0）
+面板顶栏的齿轮打开设置窗口（宽 520），三张卡片：
+- **监听服务**：Codex、Gemini 可以分别开关，开着的才出现在菜单栏和面板里；关掉的服务不再请求额度和用量（已有缓存保留）。至少保留一个，最后一个开着的开关置灰。只开一个时，菜单栏和面板放大显示这一个（面板去掉页签）。
+- **消耗汇总**：开着的服务的累计 Token 相加——Codex 是官方接口返回的全部日用量之和，Gemini 是本机 Antigravity 记录的全部日用量之和；两个都开时显示各自占比。Codex 官方用量拿不到时标「不完整」，总数只含 Gemini。
+- **通用**：登录时启动、自动检查更新。
+
 ## 参考说明
 设计时参考了开源项目 [Quosparr](https://github.com/Licoy/Quosparr)（AGPL-3.0）读取了哪些本地文件（`~/.codex/auth.json`、Antigravity 的 OAuth token 文件与钥匙串项）和调用了哪些接口（chatgpt.com `wham/usage`、`wham/profiles/me`，Cloud Code `loadCodeAssist`、`retrieveUserQuotaSummary`），并对照 openai/codex 与 google-gemini/gemini-cli 的公开源码核对格式。本仓库代码全部从零编写，没有包含或改写 Quosparr 的任何代码。
 

@@ -3,6 +3,8 @@ import SwiftUI
 /// 面板与菜单栏共用的数据。
 final class PanelModel: ObservableObject {
     @Published var tab: Service = .codex
+    /// 监听服务（契约 0.3.0 §1）：关掉的服务不显示页签和内容。
+    @Published var services = ServiceSelection.all
     @Published var codex = ServiceSnapshot(status: .loading)
     @Published var gemini = ServiceSnapshot(status: .loading)
     /// Codex 官方每日用量；nil = 还没回来或拉取失败（看 officialLoaded）。
@@ -28,6 +30,9 @@ final class PanelModel: ObservableObject {
     var onOpenSettings: () -> Void = {}
 
     func snapshot(_ s: Service) -> ServiceSnapshot { s == .codex ? codex : gemini }
+
+    /// 面板实际显示的服务：当前页签关掉了就显示第一个开着的。
+    var shownTab: Service { services.isOn(tab) ? tab : (services.enabled.first ?? tab) }
 }
 
 struct PanelView: View {
@@ -40,12 +45,18 @@ struct PanelView: View {
         let th = Theme(scheme)
         VStack(alignment: .leading, spacing: 0) {
             HeaderBar(model: model).zIndex(2)
-            ServiceTabs(model: model).padding(.horizontal, 12)
+            if model.services.isSingle {
+                // 只开一个服务：去掉页签条，换成服务头卡片（契约 0.3.0 §2）。
+                SingleServiceHeader(service: model.shownTab, snap: model.snapshot(model.shownTab), now: model.now())
+                    .padding(.horizontal, 12)
+            } else {
+                ServiceTabs(model: model).padding(.horizontal, 12)
+            }
             if fill {
                 // 顶栏和页签固定，下面的内容可以纵向滚动（以后加区块时超过屏幕高度就出滚动条）；
                 // 每次切页签按页签重建，滚动位置回到顶部。
                 ScrollView(.vertical, showsIndicators: true) { sections }
-                    .id(model.tab)
+                    .id(model.shownTab)
             } else {
                 sections
             }
@@ -56,13 +67,14 @@ struct PanelView: View {
     }
 
     var sections: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ServiceSection(service: model.tab, snap: model.snapshot(model.tab), now: model.now(),
-                           onReauthorize: model.onReauthorizeKeychain)
-            if model.tab == .codex, model.codex.status != .notLoggedIn, model.codex.status != .apiKeyOnly {
+        let tab = model.shownTab
+        return VStack(alignment: .leading, spacing: 8) {
+            ServiceSection(service: tab, snap: model.snapshot(tab), now: model.now(),
+                           onReauthorize: model.onReauthorizeKeychain, single: model.services.isSingle)
+            if tab == .codex, model.codex.status != .notLoggedIn, model.codex.status != .apiKeyOnly {
                 TokenChartSection(model: model, service: .codex)
             }
-            if model.tab == .gemini {
+            if tab == .gemini {
                 // 本机数据不依赖登录：选中 Gemini 页签就显示。
                 TokenChartSection(model: model, service: .gemini)
             }
@@ -180,7 +192,7 @@ struct ServiceTabs: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(Service.allCases, id: \.self) { s in
+            ForEach(model.services.enabled, id: \.self) { s in
                 ServiceTab(service: s, snap: model.snapshot(s), selected: model.tab == s) { model.tab = s }
             }
         }
@@ -222,6 +234,60 @@ struct ServiceTab: View {
     }
 }
 
+/// 「仅一个」状态的服务头卡片（契约 0.3.0 §2）：叠色底、圆角 10；图标 16pt 放在 28×28 圆角底上、
+/// 名称 15pt 半粗、套餐徽章、掩码邮箱；Codex 靠右「剩 N 天」。
+struct SingleServiceHeader: View {
+    let service: Service
+    let snap: ServiceSnapshot
+    let now: Date
+    @Environment(\.colorScheme) private var scheme
+
+    /// Codex 订阅剩余天数：只取「剩 N 天」那一段；过期时「订阅已过期」。
+    var daysLeft: (text: String, expired: Bool)? {
+        guard service == .codex, snap.status != .notLoggedIn, snap.status != .apiKeyOnly else { return nil }
+        let line = CodexSubscription.line(raw: snap.subscriptionUntil, planRaw: snap.planRaw,
+                                          planIsLive: snap.planIsLive ?? false, now: now)
+        guard let t = CodexSubscription.text(line) else { return nil }
+        return (t.components(separatedBy: " · ").last ?? t, line == .expired)
+    }
+
+    var body: some View {
+        let th = Theme(scheme)
+        let showAccount = snap.status != .notLoggedIn && snap.status != .keychainDenied
+        let days = daysLeft
+        HStack(spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 7).fill(th.segOn)
+                Image(systemName: service == .codex ? "terminal" : "sparkles")
+                    .font(.system(size: 16)).foregroundColor(th.ink)
+            }
+            .frame(width: 28, height: 28)
+            Text(service.title).font(.system(size: 15, weight: .semibold)).foregroundColor(th.ink)
+                .lineLimit(1).fixedSize()
+            if showAccount, let p = snap.plan {
+                Text(p).font(.system(size: 10, weight: .semibold)).foregroundColor(.white)
+                    .lineLimit(1).fixedSize()
+                    .padding(.horizontal, 8).padding(.vertical, 2)
+                    .background(Capsule().fill(Theme.gradient))
+            }
+            if showAccount, let e = snap.email {
+                Text(Fmt.maskEmail(e)).font(.system(size: 12)).foregroundColor(th.ink2)
+                    .lineLimit(1).truncationMode(.tail)
+            }
+            Spacer(minLength: 4)
+            if let d = days {
+                Text(d.text).font(.system(size: 12).monospacedDigit())
+                    .foregroundColor(d.expired ? Theme.red : Theme.green)
+                    .lineLimit(1).fixedSize()
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 48)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(th.sel))
+    }
+}
+
 // MARK: 账号行和额度卡
 
 struct ServiceSection: View {
@@ -229,6 +295,8 @@ struct ServiceSection: View {
     let snap: ServiceSnapshot
     let now: Date
     let onReauthorize: () -> Void
+    /// 只开一个服务：账号行挪到服务头卡片，额度放大（契约 0.3.0 §2）。
+    var single = false
     @Environment(\.colorScheme) private var scheme
 
     /// 订阅行（判断逻辑同 0.1.5）；有效期行去掉「订阅有效期」前缀，写成「至 yyyy/MM/dd · 剩 N 天」（契约 0.2.0 §5）。
@@ -246,7 +314,7 @@ struct ServiceSection: View {
         let sub = subscription
         let showAccount = snap.status != .notLoggedIn && snap.status != .keychainDenied && (snap.plan != nil || snap.email != nil)
         VStack(alignment: .leading, spacing: 8) {
-            if showAccount || sub != nil {
+            if !single, showAccount || sub != nil {
                 HStack(spacing: 8) {
                     if showAccount, let p = snap.plan {
                         Text(p).font(.system(size: 10, weight: .semibold)).foregroundColor(.white)
@@ -270,13 +338,13 @@ struct ServiceSection: View {
             }
             let msg = snap.message(for: service)
             if snap.hasQuota || msg != nil || snap.status == .keychainDenied {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: single ? 14 : 12) {
                     if snap.hasQuota {
                         Text("剩余额度").font(.system(size: 13, weight: .semibold)).foregroundColor(th.ink)
                             .padding(.bottom, -2)
                     }
-                    if let w = snap.weekly { QuotaRow(title: "每周", window: w, now: now) }
-                    if let f = snap.fiveHour { QuotaRow(title: "5 小时", window: f, now: now) }
+                    if let w = snap.weekly { QuotaRow(title: "每周", window: w, now: now, large: single) }
+                    if let f = snap.fiveHour { QuotaRow(title: "5 小时", window: f, now: now, large: single) }
                     if let m = msg {
                         let isError = snap.status == .fetchFailed || snap.status == .loginExpired
                         Text(m).font(.system(size: 12)).foregroundColor(isError ? Theme.red : th.ink2)
@@ -297,6 +365,8 @@ struct QuotaRow: View {
     let title: String
     let window: QuotaWindow
     let now: Date
+    /// 「仅一个」状态：百分比 28pt、进度条 6pt（契约 0.3.0 §2）。
+    var large = false
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -305,8 +375,8 @@ struct QuotaRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(title).font(.system(size: 12)).foregroundColor(th.ink2).lineLimit(1).fixedSize()
-                (Text(MenuBarText.number(window.remainingPercent)).font(.system(size: 15, weight: .semibold).monospacedDigit())
-                    + Text("%").font(.system(size: 10, weight: .medium)))
+                (Text(MenuBarText.number(window.remainingPercent)).font(.system(size: large ? 28 : 15, weight: .semibold).monospacedDigit())
+                    + Text("%").font(.system(size: large ? 13 : 10, weight: .medium)))
                     .foregroundColor(low ? Theme.red : th.ink)
                     .lineLimit(1).fixedSize()
                 Spacer(minLength: 4)
@@ -316,7 +386,7 @@ struct QuotaRow: View {
                 }
             }
             QuotaBar(fraction: window.remainingPercent / 100, color: Theme.health(window.remainingPercent),
-                     height: 5, track: th.track)
+                     height: large ? 6 : 5, track: th.track)
         }
     }
 }

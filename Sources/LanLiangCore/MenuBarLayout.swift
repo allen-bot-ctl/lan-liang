@@ -26,6 +26,12 @@ public enum MenuBarLayout {
                                      secondaryFont: .monospacedDigitSystemFont(ofSize: 10, weight: .regular),
                                      gapAfterIcon: 3, gapBeforeSecondary: 4)
 
+    /// 只开一个服务时的放大单行（契约 0.3.0 §2）：图标 15pt、周剩余 14pt 半粗、5 小时 11pt。
+    public static let large = Style(iconPoint: 15, iconColumn: 18,
+                                    primaryFont: .monospacedDigitSystemFont(ofSize: 14, weight: .semibold),
+                                    secondaryFont: .monospacedDigitSystemFont(ofSize: 11, weight: .regular),
+                                    gapAfterIcon: 3, gapBeforeSecondary: 4)
+
     /// 5 小时剩余的不透明度（模板图里显示成 secondaryLabelColor 那样的浅色）。
     public static let secondaryAlpha: CGFloat = 0.55
 
@@ -33,11 +39,14 @@ public enum MenuBarLayout {
         ceil(NSAttributedString(string: s, attributes: [.font: f]).size().width)
     }
 
-    public static func style(rowCount: Int) -> Style { rowCount >= 2 ? compact : single }
+    /// large = 只开了一个服务：用放大单行（两行时不放大）。
+    public static func style(rowCount: Int, large: Bool = false) -> Style {
+        rowCount >= 2 ? compact : (large ? Self.large : single)
+    }
 
     /// 各列宽度：图标列、周剩余列（按「100%」）、5 小时列（按「100」，任一行有 5 小时才留）。
-    public static func columns(_ rows: [MenuBarGroup]) -> (icon: CGFloat, primary: CGFloat, secondary: CGFloat) {
-        let st = style(rowCount: rows.count)
+    public static func columns(_ rows: [MenuBarGroup], large: Bool = false) -> (icon: CGFloat, primary: CGFloat, secondary: CGFloat) {
+        let st = style(rowCount: rows.count, large: large)
         let p = rows.map { textWidth($0.primary, st.primaryFont) }.reduce(textWidth("100%", st.primaryFont), max)
         let hasSecondary = rows.contains { $0.secondary != nil }
         let s = hasSecondary ? rows.compactMap { $0.secondary.map { textWidth($0, st.secondaryFont) } }
@@ -46,16 +55,16 @@ public enum MenuBarLayout {
     }
 
     /// 内容宽度（点）；rows 为空时返回 0（由调用方显示栏量图标）。
-    public static func width(_ rows: [MenuBarGroup]) -> CGFloat {
+    public static func width(_ rows: [MenuBarGroup], large: Bool = false) -> CGFloat {
         guard !rows.isEmpty else { return 0 }
-        let st = style(rowCount: rows.count)
-        let c = columns(rows)
+        let st = style(rowCount: rows.count, large: large)
+        let c = columns(rows, large: large)
         return c.icon + st.gapAfterIcon + c.primary + (c.secondary > 0 ? st.gapBeforeSecondary + c.secondary : 0)
     }
 
     /// 某一行文字的基线 y（非翻转坐标）：周剩余和 5 小时共用；给单测核对对齐用。
-    public static func baseline(rowIndex i: Int, rowCount: Int, height: CGFloat) -> CGFloat {
-        let st = style(rowCount: rowCount)
+    public static func baseline(rowIndex i: Int, rowCount: Int, height: CGFloat, large: Bool = false) -> CGFloat {
+        let st = style(rowCount: rowCount, large: large)
         let pitch: CGFloat = rowCount == 2 ? 10.5 : 0
         let cy = height / 2 + (rowCount == 2 ? (i == 0 ? pitch / 2 : -pitch / 2) : 0)
         return (cy - st.primaryFont.capHeight / 2).rounded()
@@ -64,12 +73,12 @@ public enum MenuBarLayout {
     public static func iconName(_ s: Service) -> String { s == .codex ? "terminal" : "sparkle" }
 
     /// 画出内容图；height 用菜单栏高度（NSStatusBar.system.thickness）。
-    public static func image(_ rows: [MenuBarGroup], height: CGFloat) -> NSImage? {
+    public static func image(_ rows: [MenuBarGroup], height: CGFloat, large: Bool = false) -> NSImage? {
         let rows = Array(rows.prefix(2))
         guard !rows.isEmpty else { return nil }
-        let st = style(rowCount: rows.count)
-        let c = columns(rows)
-        let w = width(rows)
+        let st = style(rowCount: rows.count, large: large)
+        let c = columns(rows, large: large)
+        let w = width(rows, large: large)
         let img = NSImage(size: NSSize(width: w, height: height), flipped: false) { _ in
             let pitch: CGFloat = rows.count == 2 ? 10.5 : 0
             for (i, row) in rows.enumerated() {
@@ -82,7 +91,7 @@ public enum MenuBarLayout {
                     sym.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1)
                 }
                 // 同一行的周剩余和 5 小时数字共用一条基线（按周剩余字体让数字视觉居中，契约 0.1.3 §3）。
-                let base = MenuBarLayout.baseline(rowIndex: i, rowCount: rows.count, height: height)
+                let base = MenuBarLayout.baseline(rowIndex: i, rowCount: rows.count, height: height, large: large)
                 func draw(_ text: String, font: NSFont, right: CGFloat, alpha: CGFloat) {
                     guard let ctx = NSGraphicsContext.current?.cgContext else { return }
                     let a = NSAttributedString(string: text, attributes: [

@@ -8,25 +8,31 @@ public enum RefreshCoordinator {
     ///   - deliver: 结果投递的队列（App 里是主队列）。
     ///   - onCodex / onGemini: 各自到了就调用。
     ///   - onAllDone: 两个都回来后调用一次（停刷新转圈用）。
+    ///   - selection: 关掉的服务完全不请求、也不回调（契约 0.3.0 §1）；onAllDone 照常调用一次。
     public static func run<C, G>(codex: @escaping () async -> C, gemini: @escaping () async -> G,
+                                 selection: ServiceSelection = .all,
                                  deliver: DispatchQueue = .main,
                                  onCodex: @escaping (C) -> Void, onGemini: @escaping (G) -> Void,
                                  onAllDone: @escaping () -> Void) {
         let lock = NSLock()
-        var remaining = 2
+        var remaining = selection.enabled.count
         func finished() {
             lock.lock(); remaining -= 1; let done = remaining == 0; lock.unlock()
             if done { deliver.async { onAllDone() } }
         }
-        Task.detached(priority: .userInitiated) {
-            let c = await codex()
-            deliver.async { onCodex(c) }
-            finished()
+        if selection.codex {
+            Task.detached(priority: .userInitiated) {
+                let c = await codex()
+                deliver.async { onCodex(c) }
+                finished()
+            }
         }
-        Task.detached(priority: .userInitiated) {
-            let g = await gemini()
-            deliver.async { onGemini(g) }
-            finished()
+        if selection.gemini {
+            Task.detached(priority: .userInitiated) {
+                let g = await gemini()
+                deliver.async { onGemini(g) }
+                finished()
+            }
         }
     }
 }

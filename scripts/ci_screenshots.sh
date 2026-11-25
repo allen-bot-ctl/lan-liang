@@ -89,18 +89,40 @@ for ap in dark light; do
   LANLIANG_FAKE="$PWD/fixtures/widest-tick.json" shoot "-v020-widest-tick-codex-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=codex --debug-hover=auto
   LANLIANG_FAKE="$nf" shoot "-v020-settings-$ap" --debug-open-settings --debug-appearance=$ap --debug-update=0.2.1
 done
+# 0.3.0（契约 0.3.0 验收 2/3）：设置窗口（两个都开 / 只开 Codex 置灰加提示 / Codex 失败「不完整」/ 最长文案），
+# 只开一个服务的菜单栏和面板（悬停一根柱子）；--debug-services 只覆盖本次启动，不写偏好。
+for ap in dark light; do
+  if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
+  nf="$PWD/fixtures/normal.json"
+  LANLIANG_FAKE="$nf" shoot "-v030-settings-both-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=codex,gemini --debug-update=0.3.1
+  LANLIANG_FAKE="$nf" shoot "-v030-settings-codex-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=codex
+  LANLIANG_FAKE="$PWD/fixtures/official-failed.json" shoot "-v030-settings-incomplete-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=codex,gemini
+  LANLIANG_FAKE="$PWD/fixtures/summary-longest.json" shoot "-v030-settings-longest-$ap" --debug-open-settings --debug-appearance=$ap --debug-services=codex,gemini
+  LANLIANG_FAKE="$nf" shoot "-v030-settings-loading-$ap" --debug-open-settings --debug-appearance=$ap --debug-loading
+  LANLIANG_FAKE="$nf" shoot "-v030-both-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex,gemini --debug-tab=codex
+  # 页签停在关掉的 Gemini 上，也要显示 Codex。
+  LANLIANG_FAKE="$nf" shoot "-v030-single-codex-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex --debug-tab=gemini --debug-hover=auto
+  LANLIANG_FAKE="$nf" shoot "-v030-single-gemini-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=gemini --debug-hover=auto
+  LANLIANG_FAKE="$PWD/fixtures/longest.json" shoot "-v030-single-codex-longest-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex
+  for t in both codex incomplete longest loading; do
+    r=$(awk '/^DEBUG_RECT_PANEL/{print $2}' "/tmp/shots--v030-settings-$t-$ap.log" | tail -n 1)
+    echo "RELEASE: settings $t $ap rect=$r"
+    [ "$(cut -d, -f3 <<<"$r")" = 520 ] || { echo "::error::设置窗口宽度不是 520: $r"; exit 1; }
+  done
+done
 # 0.2.1：快速来回切页签 20/21 次后（停在 Codex / Gemini），面板顶边不动、内容视图和窗口一致。
 for ap in dark light; do
   if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
   for n in 20 21; do
-    LANLIANG_FAKE="$PWD/fixtures/normal.json" shoot "-tabflip-$n-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=codex --debug-tab-flip=$n
+    # 只有两个服务都开时才有页签可切（0.3.0）。
+    LANLIANG_FAKE="$PWD/fixtures/normal.json" shoot "-tabflip-$n-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex,gemini --debug-tab=codex --debug-tab-flip=$n
     l=$(grep -h "^DEBUG_TABFLIP" "/tmp/shots--tabflip-$n-$ap.log" | tail -n 1)
     echo "RELEASE: tabflip $n $ap: $l"
     grep -q " topsUnique=1 " <<<"$l" && grep -q " mismatches=0$" <<<"$l" \
       || { echo "::error::切页签后面板顶边或内容错位: $l"; exit 1; }
   done
   # 内容超过高度上限时在面板里滚动（压低上限到 300pt）。
-  LANLIANG_FAKE="$PWD/fixtures/normal.json" shoot "-scroll-capped-$ap" --debug-open-panel --debug-appearance=$ap --debug-tab=gemini --debug-max-height=300 --debug-tab-flip=20
+  LANLIANG_FAKE="$PWD/fixtures/normal.json" shoot "-scroll-capped-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex,gemini --debug-tab=gemini --debug-max-height=300 --debug-tab-flip=20
 done
 # 带旧偏好升级（契约 0.1.3 §1）：预置旧版本留下的 Item-0 隐藏偏好（以及新名字也被藏），启动后状态项必须可见。
 for ap in dark light; do
@@ -143,6 +165,17 @@ chk expired-codex-daily 'codex:--,gemini:--' 2
 chk keychain-denied-gemini 'codex:77%' 1
 chk low-codex-daily 'codex:8%+25,gemini:25%+64' 2
 chk failed-gemini 'codex:77%,gemini:--' 2
+# 0.3.0：只开一个服务 → 单行放大；两个都开 → 和 0.2.2 一样两行。
+chk v030-both 'codex:77%,gemini:44%+64' 2
+chk v030-single-codex 'codex:77%' 1
+chk v030-single-gemini 'gemini:44%+64' 1
+for c in v030-both:compact v030-single-codex:large v030-single-gemini:large normal-codex-daily:compact codex-only-codex-daily:single; do
+  for ap in dark light; do
+    l=$(mbline "${c%%:*}" "$ap")
+    [ "$(field "$l" style)" = "${c##*:}" ] || { echo "::error::${c%%:*}-$ap 菜单栏样式不对: $l（应为 ${c##*:}）"; exit 1; }
+  done
+  echo "RELEASE: menubar ${c%%:*} style=${c##*:} content=$(field "$(mbline "${c%%:*}" dark)" content)pt"
+done
 lim() {  # $1=用例 $2=上限
   w=$(field "$(mbline "$1" dark)" content)
   echo "RELEASE: menubar content width $1=${w}pt (limit $2)"

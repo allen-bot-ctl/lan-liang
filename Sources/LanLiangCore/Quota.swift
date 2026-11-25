@@ -97,7 +97,13 @@ public enum MenuBarText {
 
     /// 菜单栏要显示的行：上 Codex 下 Gemini；空数组 = 只显示栏量图标。
     public static func rows(codex: ServiceSnapshot, gemini: ServiceSnapshot) -> [MenuBarGroup] {
-        [group(for: .codex, snapshot: codex), group(for: .gemini, snapshot: gemini)].compactMap { $0 }
+        rows(codex: codex, gemini: gemini, selection: .all)
+    }
+
+    /// 只显示开着的服务（契约 0.3.0 §1）：关掉的那一行不显示。
+    public static func rows(codex: ServiceSnapshot, gemini: ServiceSnapshot, selection: ServiceSelection) -> [MenuBarGroup] {
+        [selection.codex ? group(for: .codex, snapshot: codex) : nil,
+         selection.gemini ? group(for: .gemini, snapshot: gemini) : nil].compactMap { $0 }
     }
 
     public static func group(for service: Service, snapshot s: ServiceSnapshot) -> MenuBarGroup? {

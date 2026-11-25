@@ -99,6 +99,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.appearance = NSAppearance(named: a == "light" ? .aqua : .darkAqua)
         }
         if let t = argValue("debug-tab"), let s = Service(rawValue: t) { model.tab = s }
+        // 监听服务（契约 0.3.0 §1）：截图用 --debug-services 覆盖，不写盘。
+        model.services = debugServices ?? ServiceSelection.load(from: .standard)
+        keepTabEnabled()
         if let r = argValue("debug-range"), let v = TokenRange(rawValue: r) { model.range = v }
         model.hoverKey = argValue("debug-hover")
         model.onRefresh = { [weak self] in self?.refresh() }
@@ -113,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         #endif
         // 切页签、切区间、历史结果到达后，面板高度跟着内容走。
         model.$tab.map { _ in () }.merge(with: model.$range.map { _ in () }, model.$geminiHistory.map { _ in () },
-                                          model.$officialLoaded.map { _ in () })
+                                          model.$officialLoaded.map { _ in () }, model.$services.map { _ in () })
             .sink { [weak self] _ in DispatchQueue.main.async { self?.fitPanel() } }
             .store(in: &subs)
         model.onReauthorizeKeychain = { [weak self] in self?.source.allowKeychainAgain(); self?.refresh() }
@@ -191,15 +194,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 状态项两侧留白（点）；内容宽度见 MenuBarLayout.width。
     private let itemPadding: CGFloat = 6
 
-    private var rows: [MenuBarGroup] { MenuBarText.rows(codex: model.codex, gemini: model.gemini) }
+    /// 只显示开着的服务（契约 0.3.0 §1）。
+    private var rows: [MenuBarGroup] { MenuBarText.rows(codex: model.codex, gemini: model.gemini, selection: model.services) }
 
-    /// 两家都登录 → 上下两行；只登录一家 → 单行正常字号；都没登录 → 栏量图标。
+    /// 只开了一个服务 → 放大单行（契约 0.3.0 §2）；两个都开时不变。
+    private var largeMenuBar: Bool { model.services.isSingle }
+
+    /// 两家都登录 → 上下两行；只登录一家 → 单行正常字号；只开一个服务 → 单行放大；都没登录 → 栏量图标。
     private func updateMenuBar() {
         guard let b = statusItem.button else { return }
         let rs = rows
-        if let img = MenuBarLayout.image(rs, height: NSStatusBar.system.thickness) {
+        let large = largeMenuBar
+        if let img = MenuBarLayout.image(rs, height: NSStatusBar.system.thickness, large: large) {
             b.image = img
-            statusItem.length = ceil(MenuBarLayout.width(rs)) + itemPadding
+            statusItem.length = ceil(MenuBarLayout.width(rs, large: large)) + itemPadding
         } else {
             b.image = symbol("chart.bar.fill", label: "栏量")
             statusItem.length = NSStatusItem.variableLength
@@ -216,6 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if panel?.isVisible == true { hidePanel(); return }
         // 默认停在上次的页签；当前页签那家没登录、另一家登录了，就切过去。
+        keepTabEnabled()
         let shown = Set(rows.map { $0.service })
         if !shown.contains(model.tab), let other = shown.first { model.tab = other }
         showPanel(from: sender)
@@ -308,6 +317,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 截图用：来回切页签 n 次，每次检查面板顶边、内容视图和窗口是否一致，最后打印截图区域。
     private func debugFlip(_ left: Int, total: Int, tops: [CGFloat], bad: Int) {
+        // 只开一个服务时没有页签可切（契约 0.3.0 §2）：不切，直接打印截图区域。
+        if model.services.isSingle {
+            print("DEBUG_TABFLIP skipped services=\(model.services.debugText)")
+            printRects()
+            return
+        }
         if left == 0 {
             let t = tops.map { Int($0.rounded()) }
             print("DEBUG_TABFLIP flips=\(total) tab=\(model.tab.rawValue) topsUnique=\(Set(t).count) top=\(t.first ?? 0) mismatches=\(bad)")
@@ -327,11 +342,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: 刷新
 
     private func refresh() {
-        guard !model.refreshing else { return }
+        guard !model.refreshing else {
+            // 刷新途中重新打开了某个服务：这轮结束后再刷一次（契约 0.3.0 §1「重新打开时立即刷新一次」）。
+            if pendingRefresh { refreshAgain = true }
+            pendingRefresh = false
+            return
+        }
+        pendingRefresh = false
         model.refreshing = true
         if let now = source.fixedNow { model.now = { now } }
-        // 两家额度各自到了就各自更新菜单栏和面板（契约 0.1.5 §5）。
-        source.refresh(current: (model.codex, model.gemini), handlers: RefreshHandlers(
+        let selection = model.services
+        // 两家额度各自到了就各自更新菜单栏和面板（契约 0.1.5 §5）；关掉的服务不请求（契约 0.3.0 §1）。
+        source.refresh(current: (model.codex, model.gemini), selection: selection, handlers: RefreshHandlers(
             onCodex: { [weak self] s in
                 guard let self = self else { return }
                 self.model.codex = s
@@ -355,11 +377,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if self.args.contains("--debug-loading") { return }
                 self.model.refreshing = false
                 self.model.lastUpdated = Date()
+                if self.refreshAgain {
+                    self.refreshAgain = false
+                    self.refresh()
+                }
             }))
-        // Gemini 本机历史单独在后台扫，不拖慢额度和菜单栏。
+        // Gemini 本机历史单独在后台扫，不拖慢额度和菜单栏；Gemini 关掉时不扫。
+        guard selection.gemini else { return }
         source.refreshGeminiHistory { [weak self] h in
             guard let self = self, !self.args.contains("--debug-loading") else { return }
             self.model.geminiHistory = h
+        }
+    }
+
+    // MARK: 监听服务（契约 0.3.0 §1）
+
+    private var debugServices: ServiceSelection? { argValue("debug-services").flatMap { ServiceSelection.parse($0) } }
+    /// 下一次 refresh() 是「重新打开服务」触发的。
+    private var pendingRefresh = false
+    /// 当前这轮刷新结束后再刷一次。
+    private var refreshAgain = false
+
+    /// 当前页签必须是开着的服务。
+    private func keepTabEnabled() {
+        if !model.services.isOn(model.tab), let first = model.services.enabled.first { model.tab = first }
+    }
+
+    /// 设置窗口里拨开关：最后一个开着的服务拨不动，偏好不变。
+    private func setService(_ s: Service, on: Bool) {
+        let old = model.services
+        let new = old.setting(s, on: on)
+        guard new != old else { return }
+        model.services = new
+        if debugServices == nil { new.save(to: .standard) }
+        keepTabEnabled()
+        updateMenuBar()
+        DispatchQueue.main.async { self.fitPanel() }
+        if on {
+            pendingRefresh = true
+            refresh()
         }
     }
 
@@ -428,12 +484,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.checkUpdates()
         }
         settingsModel.onQuit = { quitWithFallback() }
+        settingsModel.setService = { [weak self] s, on in self?.setService(s, on: on) }
         if settingsWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 160),
+            // 宽 520、固定尺寸不能缩放（契约 0.3.0 §3）；高度由内容决定（SettingsView 宽度固定）。
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 470),
                              styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
             w.title = "栏量设置"
             w.isReleasedWhenClosed = false
-            w.contentViewController = NSHostingController(rootView: SettingsView(model: settingsModel))
+            w.contentViewController = NSHostingController(rootView: SettingsView(model: settingsModel, panel: model))
             w.center()
             settingsWindow = w
         }
@@ -469,8 +527,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if let p = panel { print("DEBUG_RECT_PANEL \(top(p.frame))") }
         let rs = rows
         let groups = rs.map { "\($0.service.rawValue):\($0.primary)\($0.secondary.map { "+" + $0 } ?? "")" }
-        let content = String(format: "%.1f", MenuBarLayout.width(rs))
-        print("DEBUG_MENUBAR items=\(statusItemCount) visible=\(statusItem.isVisible ? 1 : 0) autosave=\(statusItem.autosaveName ?? "") rows=\(rs.count) content=\(content) item=\(Int(itemWidth)) groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ","))")
+        let large = largeMenuBar
+        let content = String(format: "%.1f", MenuBarLayout.width(rs, large: large))
+        let style = rs.count >= 2 ? "compact" : (large ? "large" : "single")
+        print("DEBUG_MENUBAR items=\(statusItemCount) visible=\(statusItem.isVisible ? 1 : 0) autosave=\(statusItem.autosaveName ?? "") rows=\(rs.count) content=\(content) item=\(Int(itemWidth)) groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ",")) services=\(model.services.debugText) style=\(style)")
         fflush(stdout)
     }
 }

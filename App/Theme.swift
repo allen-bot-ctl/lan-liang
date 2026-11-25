@@ -10,6 +10,14 @@ struct Theme {
     static var gradient: LinearGradient {
         LinearGradient(colors: [accent2, accent], startPoint: .top, endPoint: .bottom)
     }
+    /// 消耗汇总占比条（契约 0.3.0 §4）：Codex 橙色渐变、Gemini #8E8CF5。
+    static let purple = Color(red: 0x8E / 255, green: 0x8C / 255, blue: 0xF5 / 255)
+    static var codexFill: LinearGradient {
+        LinearGradient(colors: [accent2, accent], startPoint: .leading, endPoint: .trailing)
+    }
+    static var geminiFill: LinearGradient {
+        LinearGradient(colors: [purple, purple], startPoint: .leading, endPoint: .trailing)
+    }
     static let green = Color(nsColor: .systemGreen)
     static let red = Color(nsColor: .systemRed)
 

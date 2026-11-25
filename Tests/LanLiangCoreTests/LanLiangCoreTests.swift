@@ -1125,3 +1125,212 @@ final class PanelTextTests: XCTestCase {
         XCTAssertEqual(PanelText.tabPercent(ServiceSnapshot(status: .fetchFailed, weekly: w)), "77%")   // 失败保留上次值
     }
 }
+
+// MARK: 0.3.0 监听服务与消耗汇总
+
+final class ServiceSelectionTests: XCTestCase {
+    private func freshDefaults() -> (UserDefaults, String) {
+        let name = "lanliang.test.\(UUID().uuidString)"
+        return (UserDefaults(suiteName: name)!, name)
+    }
+
+    func testDefaultsBothOnAndPersist() {
+        let (d, name) = freshDefaults()
+        defer { d.removePersistentDomain(forName: name) }
+        XCTAssertEqual(ServiceSelection.load(from: d), ServiceSelection(codex: true, gemini: true))
+        let codexOnly = ServiceSelection.all.setting(.gemini, on: false)
+        codexOnly.save(to: d)
+        XCTAssertEqual(d.object(forKey: "monitor.codex") as? Bool, true)
+        XCTAssertEqual(d.object(forKey: "monitor.gemini") as? Bool, false)
+        XCTAssertEqual(ServiceSelection.load(from: d), codexOnly)
+        XCTAssertEqual(ServiceSelection.load(from: d).enabled, [.codex])
+        XCTAssertTrue(ServiceSelection.load(from: d).isSingle)
+        XCTAssertFalse(ServiceSelection.all.isSingle)
+        XCTAssertEqual(ServiceSelection.all.enabled, [.codex, .gemini])
+    }
+
+    func testLastEnabledCannotBeTurnedOff() {
+        let (d, name) = freshDefaults()
+        defer { d.removePersistentDomain(forName: name) }
+        let geminiOnly = ServiceSelection(codex: false, gemini: true)
+        geminiOnly.save(to: d)
+        XCTAssertFalse(geminiOnly.canToggle(.gemini))
+        XCTAssertTrue(geminiOnly.canToggle(.codex))
+        XCTAssertTrue(ServiceSelection.all.canToggle(.codex))
+        XCTAssertTrue(ServiceSelection.all.canToggle(.gemini))
+        // 关不掉：结果不变，偏好也不变
+        let after = geminiOnly.setting(.gemini, on: false)
+        XCTAssertEqual(after, geminiOnly)
+        XCTAssertEqual(ServiceSelection.load(from: d), geminiOnly)
+        // 两个都关的旧偏好按两个都开
+        d.set(false, forKey: "monitor.codex"); d.set(false, forKey: "monitor.gemini")
+        XCTAssertEqual(ServiceSelection.load(from: d), ServiceSelection.all)
+        XCTAssertEqual(ServiceSelection(codex: false, gemini: false), ServiceSelection.all)
+        // 重新打开
+        XCTAssertEqual(geminiOnly.setting(.codex, on: true), ServiceSelection.all)
+    }
+
+    func testDebugParse() {
+        XCTAssertEqual(ServiceSelection.parse("codex"), ServiceSelection(codex: true, gemini: false))
+        XCTAssertEqual(ServiceSelection.parse("gemini"), ServiceSelection(codex: false, gemini: true))
+        XCTAssertEqual(ServiceSelection.parse("codex,gemini"), ServiceSelection.all)
+        XCTAssertNil(ServiceSelection.parse("foo"))
+        XCTAssertEqual(ServiceSelection.parse("gemini")?.debugText, "gemini")
+        XCTAssertEqual(ServiceSelection.all.debugText, "codex,gemini")
+    }
+
+    func testMenuBarRowsHideDisabled() {
+        let w = QuotaWindow(kind: .weekly, remainingPercent: 77, resetsAt: nil)
+        let c = ServiceSnapshot(status: .ok, weekly: w), g = ServiceSnapshot(status: .ok, weekly: w)
+        XCTAssertEqual(MenuBarText.rows(codex: c, gemini: g, selection: .all).map { $0.service }, [.codex, .gemini])
+        XCTAssertEqual(MenuBarText.rows(codex: c, gemini: g, selection: ServiceSelection(codex: true, gemini: false)).map { $0.service }, [.codex])
+        XCTAssertEqual(MenuBarText.rows(codex: c, gemini: g, selection: ServiceSelection(codex: false, gemini: true)).map { $0.service }, [.gemini])
+        // 只开 Codex 但没登录 → 栏量图标
+        XCTAssertTrue(MenuBarText.rows(codex: ServiceSnapshot(status: .notLoggedIn), gemini: g,
+                                       selection: ServiceSelection(codex: true, gemini: false)).isEmpty)
+        XCTAssertEqual(MenuBarText.rows(codex: c, gemini: g), MenuBarText.rows(codex: c, gemini: g, selection: .all))
+    }
+
+    func testAccountLine() {
+        let s = ServiceSnapshot(status: .ok, email: "allen@verylongcompanydomain.com", plan: "Google AI Ultra")
+        XCTAssertEqual(SettingsText.accountLine(service: .gemini, snap: s), "已登录 · Google AI Ultra · a***@verylongcompanydomain.com")
+        XCTAssertEqual(SettingsText.accountLine(service: .codex, snap: ServiceSnapshot(status: .notLoggedIn)), "未检测到登录")
+        XCTAssertEqual(SettingsText.accountLine(service: .codex, snap: ServiceSnapshot(status: .loading), isOn: false), "已关闭")
+        XCTAssertEqual(SettingsText.keepOneHint, "至少保留一个服务，最后一个开关不能关。")
+    }
+
+    #if canImport(AppKit)
+    func testLargeMenuBarStyle() {
+        let r = [MenuBarGroup(service: .codex, primary: "100%", secondary: "100")]
+        XCTAssertEqual(MenuBarLayout.style(rowCount: 1, large: true).primaryFont.pointSize, 14)
+        XCTAssertEqual(MenuBarLayout.style(rowCount: 1, large: true).secondaryFont.pointSize, 11)
+        XCTAssertEqual(MenuBarLayout.style(rowCount: 1, large: true).iconPoint, 15)
+        XCTAssertEqual(MenuBarLayout.style(rowCount: 2, large: true).primaryFont.pointSize, 9.5)   // 两行不放大
+        let large = MenuBarLayout.width(r, large: true), normal = MenuBarLayout.width(r)
+        print("MENUBAR_WIDTH large_single_5h=\(large) single_5h=\(normal)")
+        XCTAssertGreaterThan(large, normal)
+        // 宽度只按最长文案定，数字变化不跳
+        XCTAssertEqual(MenuBarLayout.width([MenuBarGroup(service: .codex, primary: "8%", secondary: "5")], large: true), large)
+        XCTAssertNotNil(MenuBarLayout.image(r, height: 22, large: true))
+    }
+    #endif
+}
+
+final class UsageSummaryTests: XCTestCase {
+    let official: [String: Int64] = ["2026-11-01": 19_000_000_000, "2026-11-02": 300_000_000]
+    let gemini = GeminiHistory(foundDirectory: true, conversations: 3, failed: 0,
+                               daily: ["2026-05-21": 400_000_000, "2026-11-24": 69_000_000])
+
+    func testBothServices() {
+        let s = UsageSummary.make(selection: .all, official: official, officialLoaded: true, gemini: gemini)
+        XCTAssertFalse(s.loading); XCTAssertFalse(s.incomplete)
+        XCTAssertEqual(s.total, 19_769_000_000)
+        XCTAssertEqual(Fmt.tokens(s.total!), "197.69亿")
+        XCTAssertTrue(s.showsSplit)
+        XCTAssertEqual(s.items.map { $0.service }, [.codex, .gemini])
+        XCTAssertEqual(s.items[0].tokens, 19_300_000_000)
+        XCTAssertEqual(s.items[1].tokens, 469_000_000)
+        XCTAssertEqual(UsageSummary.percent(s.items[0].share!), "97.6%")
+        XCTAssertEqual(UsageSummary.percent(s.items[1].share!), "2.4%")
+        XCTAssertEqual(Fmt.tokens(999_999_000_000), "9999.99亿")
+    }
+
+    func testSingleService() {
+        let c = UsageSummary.make(selection: ServiceSelection(codex: true, gemini: false), official: official,
+                                  officialLoaded: true, gemini: gemini)
+        XCTAssertEqual(c.total, 19_300_000_000)
+        XCTAssertEqual(c.items.count, 1)
+        XCTAssertFalse(c.showsSplit)
+        XCTAssertNil(c.items[0].share)
+        let g = UsageSummary.make(selection: ServiceSelection(codex: false, gemini: true), official: nil,
+                                  officialLoaded: false, gemini: gemini)
+        XCTAssertEqual(g.total, 469_000_000)
+        XCTAssertFalse(g.loading)   // Codex 关掉时不等它
+        XCTAssertFalse(g.incomplete)
+    }
+
+    func testCodexFailedOnlyCountsGemini() {
+        let s = UsageSummary.make(selection: .all, official: nil, officialLoaded: true, gemini: gemini)
+        XCTAssertTrue(s.incomplete)
+        XCTAssertFalse(s.loading)
+        XCTAssertEqual(s.total, 469_000_000)
+        XCTAssertEqual(Fmt.tokens(s.total!), "4.69亿")
+        XCTAssertEqual(s.items[0].state, .unavailable)
+        XCTAssertNil(s.items[0].tokens)
+        XCTAssertFalse(s.showsSplit)
+        XCTAssertNil(s.items[1].share)
+        XCTAssertEqual(SettingsText.unavailable(.codex), "官方用量暂时拿不到")
+        // 只开 Codex 且失败：没有可显示的数
+        let only = UsageSummary.make(selection: ServiceSelection(codex: true, gemini: false), official: nil,
+                                     officialLoaded: true, gemini: nil)
+        XCTAssertTrue(only.incomplete)
+        XCTAssertNil(only.total)
+    }
+
+    func testGeminiAllFailedIncomplete() {
+        let bad = GeminiHistory(foundDirectory: true, conversations: 2, failed: 2, daily: [:])
+        let s = UsageSummary.make(selection: .all, official: official, officialLoaded: true, gemini: bad)
+        XCTAssertTrue(s.incomplete)
+        XCTAssertEqual(s.total, 19_300_000_000)
+        XCTAssertEqual(s.items[1].state, .unavailable)
+        // 没有目录 / 没有用量：算 0，不算失败
+        let none = GeminiHistory(foundDirectory: false, conversations: 0, failed: 0, daily: [:])
+        let t = UsageSummary.make(selection: .all, official: official, officialLoaded: true, gemini: none)
+        XCTAssertFalse(t.incomplete)
+        XCTAssertEqual(t.total, 19_300_000_000)
+    }
+
+    func testLoading() {
+        let s = UsageSummary.make(selection: .all, official: nil, officialLoaded: false, gemini: gemini)
+        XCTAssertTrue(s.loading)
+        XCTAssertNil(s.total)          // 不显示 0
+        XCTAssertFalse(s.showsSplit)
+        XCTAssertEqual(s.items[0].state, .loading)
+        let g = UsageSummary.make(selection: .all, official: official, officialLoaded: true, gemini: nil)
+        XCTAssertTrue(g.loading)
+        XCTAssertNil(g.total)
+    }
+}
+
+final class DisabledServiceRequestTests: XCTestCase {
+    final class Counter {
+        private let lock = NSLock(); private var n: [String: Int] = [:]
+        func hit(_ k: String) { lock.lock(); n[k, default: 0] += 1; lock.unlock() }
+        func count(_ k: String) -> Int { lock.lock(); defer { lock.unlock() }; return n[k] ?? 0 }
+    }
+
+    func testDisabledServiceNotRequested() {
+        let counter = Counter()
+        let done = expectation(description: "done")
+        RefreshCoordinator.run(
+            codex: { counter.hit("codex-request"); return 1 },
+            gemini: { counter.hit("gemini-request"); return 2 },
+            selection: ServiceSelection(codex: false, gemini: true),
+            onCodex: { _ in counter.hit("codex-deliver") },
+            onGemini: { _ in counter.hit("gemini-deliver") },
+            onAllDone: { done.fulfill() })
+        wait(for: [done], timeout: 3)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(counter.count("codex-request"), 0)
+        XCTAssertEqual(counter.count("codex-deliver"), 0)
+        XCTAssertEqual(counter.count("gemini-request"), 1)
+        XCTAssertEqual(counter.count("gemini-deliver"), 1)
+    }
+
+    func testOnlyCodexEnabled() {
+        let counter = Counter()
+        let done = expectation(description: "done")
+        RefreshCoordinator.run(
+            codex: { counter.hit("codex-request"); return 1 },
+            gemini: { counter.hit("gemini-request"); return 2 },
+            selection: ServiceSelection(codex: true, gemini: false),
+            onCodex: { _ in counter.hit("codex-deliver") },
+            onGemini: { _ in counter.hit("gemini-deliver") },
+            onAllDone: { done.fulfill() })
+        wait(for: [done], timeout: 3)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(counter.count("codex-request"), 1)
+        XCTAssertEqual(counter.count("gemini-request"), 0)
+        XCTAssertEqual(counter.count("gemini-deliver"), 0)
+    }
+}
