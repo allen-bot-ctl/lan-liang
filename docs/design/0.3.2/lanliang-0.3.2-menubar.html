@@ -1,0 +1,50 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>栏量 0.3.2 菜单栏</title><style>
+body{margin:0;padding:16px;font-family:-apple-system,"SF Pro Text","PingFang SC","Noto Sans CJK SC",sans-serif;background:#d9dce3}
+h2{font-size:14px;margin:12px 0 6px}.lab{font-size:11px;color:#444;width:150px;flex:none}
+.r{display:flex;align-items:center;gap:10px;margin:6px 0}
+.bar{height:22px;width:360px;display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:0 10px;font-size:13px;border-radius:4px}
+.L{background:rgba(246,246,248,.92);color:#1d1d1f;--sec:rgba(0,0,0,.5);--div:rgba(0,0,0,.35);--or:#C25400}
+.D{background:rgba(30,30,32,.92);color:#fff;--sec:rgba(255,255,255,.5);--div:rgba(255,255,255,.35);--or:#FF9F0A}
+.sys{font-size:12px;opacity:.85}
+.it{display:flex;align-items:center;height:22px;padding:0 3px;font-variant-numeric:tabular-nums}
+.row{display:flex;align-items:center}
+svg{fill:none;stroke:currentColor;stroke-width:1.6}
+/* old */
+.old .row .p{text-align:right} .old .row .s{color:currentColor;opacity:.55}
+/* columns */
+.col{display:inline-block}
+.dv{background:var(--div);flex:none}
+.or{color:var(--or)}.dash{color:var(--sec)}
+</style></head><body>
+<div id="root"></div>
+<script>
+const ico=(s,svc)=>svc==='c'?`<svg width="${s}" height="${s}" viewBox="0 0 14 14"><rect x="1.5" y="2" width="11" height="10" rx="2"/><path d="M4 5.5 6 7 4 8.5M7.5 9h2.5" stroke-linecap="round"/></svg>`:`<svg width="${s}" height="${s}" viewBox="0 0 14 14" style="fill:currentColor;stroke:none"><path d="M7 .8c.5 3.3 2.9 5.7 6.2 6.2-3.3.5-5.7 2.9-6.2 6.2C6.5 9.9 4.1 7.5.8 7 4.1 6.5 6.5 4.1 7 .8z"/></svg>`;
+// widths: measure "100%" / "100" with canvas
+const cv=document.createElement('canvas').getContext('2d');
+const mw=(t,f)=>{cv.font=f;return Math.ceil(cv.measureText(t).width)};
+const FF='"SF Pro Text","PingFang SC","Noto Sans CJK SC",sans-serif';
+const S={large:{ip:15,col:18,pf:`600 14px ${FF}`,sf:`400 11px ${FF}`,ga:3,gs:4,ncol:15,nga:2,dh:11,dg:3},
+         compact:{ip:8,col:10,pf:`600 9.5px ${FF}`,sf:`400 8.5px ${FF}`,ga:2,gs:3,ncol:9,nga:1.5,dh:7,dg:2}};
+function rowOld(st,svc,p,s){const pw=mw('100%',st.pf),sw=mw('100',st.sf);
+ return `<div class="row" style="height:${st===S.large?22:10.5}px"><span style="width:${st.col}px;display:flex;justify-content:center">${ico(st.ip,svc)}</span><span style="width:${st.ga}px"></span>
+ <span class="col p" style="width:${pw}px;font:${st.pf};text-align:right">${p}</span>${s!=null?`<span style="width:${st.gs}px"></span><span class="col s" style="width:${sw}px;font:${st.sf};text-align:right;opacity:.55">${s}</span>`:''}</div>`}
+function rowNew(st,svc,p,s){const pw=mw('100%',st.pf),sw=mw('100',st.sf);
+ return `<div class="row" style="height:${st===S.large?22:10.5}px"><span style="width:${st.ncol}px;display:flex;justify-content:center">${ico(st.ip,svc)}</span><span style="width:${st.nga}px"></span>
+ <span class="col p" style="width:${pw}px;font:${st.pf};text-align:left">${p}</span><span style="width:${st.dg}px"></span><span class="dv" style="width:1px;transform:scaleX(.5);height:${st.dh}px"></span><span style="width:${st.dg}px"></span>
+ <span class="col ${s==null?'dash':'or'}" style="width:${sw}px;font:${st.sf};font-weight:${s==null?400:600};text-align:left">${s==null?'--':s}</span></div>`}
+const wOld=(st,has)=>st.col+st.ga+mw('100%',st.pf)+(has?st.gs+mw('100',st.sf):0);
+const wNew=st=>st.ncol+st.nga+mw('100%',st.pf)+st.dg*2+0.5+mw('100',st.sf);
+function bar(cls,inner){return `<div class="bar ${cls}"><span class="it">${inner}</span><span class="sys">100% ▮</span><span class="sys">周三 04:55</span></div>`}
+let h='';
+for(const m of ['L','D']){
+ h+=`<h2>${m==='L'?'浅色菜单栏':'深色菜单栏'}</h2>`;
+ h+=`<div class="r"><span class="lab">旧 · 只开 Codex</span>${bar(m+' old',rowOld(S.large,'c','77%',null))}</div>`;
+ h+=`<div class="r"><span class="lab">新 · 只开 Codex（-- 占位）</span>${bar(m,rowNew(S.large,'c','77%',null))}</div>`;
+ h+=`<div class="r"><span class="lab">旧 · 只开 Gemini</span>${bar(m+' old',rowOld(S.large,'g','44%','64'))}</div>`;
+ h+=`<div class="r"><span class="lab">新 · 只开 Gemini</span>${bar(m,rowNew(S.large,'g','44%','64'))}</div>`;
+ h+=`<div class="r"><span class="lab">旧 · 两个服务</span>${bar(m+' old','<div>'+rowOld(S.compact,'c','77%',null)+rowOld(S.compact,'g','44%','64')+'</div>')}</div>`;
+ h+=`<div class="r"><span class="lab">新 · 两个服务</span>${bar(m,'<div>'+rowNew(S.compact,'c','77%',null)+rowNew(S.compact,'g','44%','64')+'</div>')}</div>`;
+}
+h+=`<p id="w" style="font-size:11px">宽度（浏览器字体近似）：单行 旧 ${wOld(S.large,true)} / 新 ${wNew(S.large).toFixed(1)}；两行 旧 ${wOld(S.compact,true)} / 新 ${wNew(S.compact).toFixed(1)}</p>`;
+document.getElementById('root').innerHTML=h;
+</script></body></html>
