@@ -611,7 +611,8 @@ struct BarChart: View {
                     if let st = stacks?[b.key], st.total > 0 {
                         // Codex 橙色在下、Gemini #8E8CF5 在上；只有一段时整根柱子就是那一段的颜色。
                         let hb = h * CGFloat(Double(st.codex) / Double(st.total))
-                        ZStack(alignment: .bottom) {
+                        // 上下两段不重叠（降透明时不会透出底下那段的颜色）。
+                        VStack(spacing: 0) {
                             TopRounded(radius: 2).fill(st.gemini > 0 ? Theme.geminiFill : Theme.codexFill)
                             if st.gemini > 0 && st.codex > 0 {
                                 Rectangle().fill(Theme.codexFill).frame(height: hb)
