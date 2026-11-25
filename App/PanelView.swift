@@ -32,6 +32,8 @@ final class PanelModel: ObservableObject {
 
 struct PanelView: View {
     @ObservedObject var model: PanelModel
+    /// true：撑满窗口、内容贴顶（窗口高度慢一拍时也不会把顶部吞掉或在顶上留白）；false：只量自然高度。
+    var fill = true
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -53,6 +55,7 @@ struct PanelView: View {
             .padding(12)
         }
         .frame(width: 400)
+        .frame(maxHeight: fill ? .infinity : nil, alignment: .top)
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(th.panelStroke, lineWidth: 0.5))
     }
 }

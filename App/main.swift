@@ -63,6 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItemCount = 0
     private var panel: FloatingPanel?
     private var host: NSHostingView<PanelView>?
+    /// 只用来量面板自然高度（不进窗口）。
+    private var measurer: NSHostingController<PanelView>?
     private var settingsWindow: NSWindow?
     private let settingsModel = SettingsModel()
     private var outsideMonitor: Any?
@@ -140,7 +142,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if args.contains("--debug-open-panel") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 self.showPanel(from: self.statusItem.button)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.printRects() }
+                if let n = argValue("debug-tab-flip").flatMap({ Int($0) }) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.debugFlip(n, total: n, tops: [], bad: 0) }
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.printRects() }
+                }
             }
         }
     }
@@ -222,6 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func ensurePanel() {
         guard panel == nil else { return }
         let h = NSHostingView(rootView: PanelView(model: model))
+        // 不让 NSHostingView 按内容自己改尺寸（它在视效视图里会从左下角伸缩，顶部被吞或顶上留白）；
+        // 尺寸只由 fitPanel 同步算出、一次设到窗口上（0.2.1 修复）。
+        h.sizingOptions = []
+        measurer = NSHostingController(rootView: PanelView(model: model, fill: false))
         let p = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                               styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.isFloatingPanel = true
@@ -247,8 +257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ensurePanel()
         guard let button = button, let win = button.window else { return }
         let r = win.convertToScreen(button.convert(button.bounds, to: nil))
-        guard let panel = panel, let host = host else { return }
-        let size = host.fittingSize
+        guard let panel = panel else { return }
+        let size = panelSize()
         var x = r.minX
         if let screen = win.screen ?? NSScreen.main {
             x = min(max(x, screen.visibleFrame.minX + 8), screen.visibleFrame.maxX - size.width - 8)
@@ -271,13 +281,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 内容变化后保持面板顶边不动、高度跟内容走。
     private func fitPanel() {
         guard let panel = panel, panel.isVisible else { return }
-        guard let host = host else { return }
-        let size = host.fittingSize
+        let size = panelSize()
         var f = panel.frame
-        f.origin.y = f.maxY - size.height
+        guard abs(f.height - size.height) > 0.5 || abs(f.width - size.width) > 0.5 else { return }
+        f.origin.y = f.maxY - size.height      // 顶边钉在菜单栏下面不动
         f.size = size
-        panel.setFrame(f, display: true)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            ctx.allowsImplicitAnimation = false
+            panel.setFrame(f, display: true, animate: false)
+        }
+        panel.contentView?.layoutSubtreeIfNeeded()
         panel.invalidateShadow()
+    }
+
+    /// 按当前数据同步量出面板尺寸（宽 400）。
+    private func panelSize() -> NSSize {
+        guard let m = measurer else { return NSSize(width: 400, height: 300) }
+        m.rootView = PanelView(model: model, fill: false)
+        let s = m.sizeThatFits(in: NSSize(width: 400, height: 4000))
+        return NSSize(width: 400, height: ceil(s.height))
+    }
+
+    /// 截图用：来回切页签 n 次，每次检查面板顶边、内容视图和窗口是否一致，最后打印截图区域。
+    private func debugFlip(_ left: Int, total: Int, tops: [CGFloat], bad: Int) {
+        if left == 0 {
+            let t = tops.map { Int($0.rounded()) }
+            print("DEBUG_TABFLIP flips=\(total) tab=\(model.tab.rawValue) topsUnique=\(Set(t).count) top=\(t.first ?? 0) mismatches=\(bad)")
+            printRects()
+            return
+        }
+        model.tab = model.tab == .codex ? .gemini : .codex
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            self.fitPanel()
+            guard let p = self.panel, let h = self.host, let cv = p.contentView else { return }
+            let ok = abs(h.frame.height - cv.bounds.height) < 0.5 && abs(h.frame.maxY - cv.bounds.maxY) < 0.5
+                && abs(self.panelSize().height - p.frame.height) < 0.5
+            self.debugFlip(left - 1, total: total, tops: tops + [p.frame.maxY], bad: bad + (ok ? 0 : 1))
+        }
     }
 
     // MARK: 刷新
