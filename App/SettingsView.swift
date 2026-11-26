@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// 设置窗口的数据（契约 0.2.0 §7 + 0.3.0 §3）：两项通用开关 + 监听服务回调；面板数据从 PanelModel 读。
@@ -326,6 +327,9 @@ struct SummaryChart: View {
     @State private var range: TokenRange
     @State private var hover: String?
     @State private var modelSelection: ModelPeriodSelection
+    @State private var exportNotice: String?
+    @State private var exportedURL: URL?
+    @State private var debugExported = false
     @Environment(\.colorScheme) private var scheme
 
     init(panel: PanelModel, summary: UsageSummary) {
@@ -359,6 +363,45 @@ struct SummaryChart: View {
         case "first": return bars.first?.key
         case "last": return bars.last?.key
         default: return key
+        }
+    }
+
+    private var geminiModelUnavailable: Bool {
+        let status = panel.geminiHistory?.display
+        return status == .allFailed || status == .noDirectory
+    }
+
+    private var canExport: Bool {
+        (codexDaily != nil || (geminiDaily != nil && !geminiModelUnavailable)) && !summary.loading
+            && (!panel.services.codex || panel.loadedCodexModelActivity)
+            && (!panel.services.gemini || geminiModelUnavailable || panel.geminiHistory?.modelDaily != nil)
+    }
+
+    @MainActor
+    private func export(to directory: URL? = nil) {
+        let now = panel.now()
+        let calendar = TokenSeries.calendar()
+        let codex = codexDaily
+        let gemini = geminiModelUnavailable ? nil : geminiDaily
+        let bars = StackedSeries.bars(range: range, codex: codex, gemini: gemini, now: now, calendar: calendar)
+        var groups: [(Service, Bool, DailyModelWeights?)] = []
+        if panel.services.codex { groups.append((.codex, codex != nil, panel.codexModelActivity)) }
+        if panel.services.gemini {
+            groups.append((.gemini, gemini != nil, geminiModelUnavailable ? nil : panel.geminiHistory?.modelDaily))
+        }
+        let snapshot = UsageExportSnapshot(range: range, bars: bars, selection: modelSelection,
+                                           now: now, calendar: calendar, groups: groups)
+        do {
+            let url = try UsageExport.write(snapshot, to: directory)
+            exportedURL = url
+            exportNotice = "已保存到「下载」"
+            if directory != nil {
+                print("DEBUG_USAGE_EXPORT_OK start=\(snapshot.start) end=\(snapshot.end) bars=\(snapshot.bars.count) total=\(snapshot.total)")
+            }
+        } catch {
+            exportedURL = nil
+            exportNotice = "无法保存图片，请检查「下载」文件夹权限或剩余空间。"
+            if directory != nil { print("DEBUG_USAGE_EXPORT_FAILED") }
         }
     }
 
@@ -412,7 +455,32 @@ struct SummaryChart: View {
                 ModelDistributionSection(panel: panel, start: scope.start, end: scope.end, range: range,
                                          selectedLabel: scope.selected?.label, onClear: { modelSelection.clear() })
                     .id("settings-model-distribution")
+                HStack(spacing: 8) {
+                    Button { export() } label: {
+                        Label("下载图片", systemImage: "arrow.down.to.line")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .help("将当前用量范围和模型分布保存为 PNG")
+                    .disabled(!canExport)
+                    if let exportNotice {
+                        Text(exportNotice).font(.system(size: 10)).foregroundColor(th.ink3)
+                            .accessibilityLabel(exportNotice)
+                    }
+                    if let exportedURL {
+                        Button("在访达显示") {
+                            NSWorkspace.shared.activateFileViewerSelecting([exportedURL])
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 10))
+                    }
+                }
             }
+        }
+        .task(id: canExport) { @MainActor in
+            guard canExport, !debugExported, ProcessInfo.processInfo.environment["LANLIANG_FAKE"] != nil,
+                  let target = argValue("debug-usage-export-dir"), !target.isEmpty else { return }
+            debugExported = true
+            export(to: URL(fileURLWithPath: target, isDirectory: true))
         }
     }
 }

@@ -5,7 +5,7 @@ import ServiceManagement
 import Sparkle
 #endif
 
-/// 无边框浮层面板：点菜单栏项打开，点别处关闭。
+/// 无边框浮层面板：悬停预览、点按固定，点别处关闭。
 final class FloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
@@ -64,6 +64,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var host: NSHostingView<PanelRoot>?
     private let settingsModel = SettingsModel()
     private var outsideMonitor: Any?
+    private let itemHoverTracking = HoverTracking()
+    private let panelHoverTracking = HoverTracking()
+    private var hover = MenuPanelHover()
+    private var hoverCloseTimer: Timer?
+    private var hoverEnabled: Bool { !isDebug || args.contains("--debug-hover-lifecycle") }
     private let contextMenu = NSMenu()
     private let loginItem = NSMenuItem(title: "登录时启动", action: #selector(toggleLogin), keyEquivalent: "")
     private var timer: Timer?
@@ -113,6 +118,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.onReauthorizeKeychain = { [weak self] in self?.source.allowKeychainAgain(); self?.refresh() }
 
         statusItem = makeItem()
+        itemHoverTracking.didEnter = { [weak self] in self?.hoverItemEntered() }
+        itemHoverTracking.didLeave = { [weak self] in self?.hoverRegionLeft() }
+        panelHoverTracking.didEnter = { [weak self] in self?.hoverPanelEntered() }
+        panelHoverTracking.didLeave = { [weak self] in self?.hoverRegionLeft() }
+        if hoverEnabled, let button = statusItem.button { itemHoverTracking.attach(to: button) }
         // 菜单栏深浅色变化（系统外观、壁纸着色）时重画，文字颜色跟着变（0.3.2）。
         appearanceObservation = statusItem.button?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
             DispatchQueue.main.async { self?.updateMenuBar() }
@@ -132,7 +142,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
 
-        if args.contains("--debug-settings-roundtrip") {
+        if args.contains("--debug-hover-lifecycle") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugHoverLifecycle() }
+        } else if args.contains("--debug-settings-roundtrip") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugSettingsRoundTrip() }
         } else if args.contains("--debug-open-settings") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
@@ -214,20 +226,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func clicked(_ sender: NSButton) {
-        if NSApp.currentEvent?.type == .rightMouseUp {
-            hidePanel()
+        if NSApp.currentEvent?.type == .rightMouseUp || NSApp.currentEvent?.modifierFlags.contains(.control) == true {
+            contextMenuWillOpen()
             statusItem.menu = contextMenu
-            statusItem.button?.performClick(nil)
+            sender.performClick(nil)
             statusItem.menu = nil
+            hover.endMenu()
             return
         }
-        if panel?.isVisible == true { hidePanel(); return }
+        cancelHoverClose()
+        hover.click()
+        if hover.mode == .hidden { hidePanel() }
+        else { openMenuPanel(from: sender) }
+    }
+
+    private func openMenuPanel(from sender: NSButton?) {
+        guard panel?.isVisible != true else { return }
         // 默认停在上次的页签；当前页签那家没登录、另一家登录了，就切过去。
         keepTabEnabled()
         let shown = Set(rows.map { $0.service })
         if !shown.contains(model.tab), let other = shown.first { model.tab = other }
         showPanel(from: sender)
+        guard panel?.isVisible == true else { hover.hide(); return }
         refresh()
+    }
+
+    private func hoverItemEntered() {
+        cancelHoverClose()
+        hover.enterItem()
+        if hover.mode == .preview { openMenuPanel(from: statusItem.button) }
+    }
+
+    private func hoverPanelEntered() {
+        cancelHoverClose()
+        hover.enterPanel()
+    }
+
+    private func hoverRegionLeft() {
+        cancelHoverClose()
+        hover.leave(now: ProcessInfo.processInfo.systemUptime)
+        guard hover.deadline != nil else { return }
+        let timer = Timer(timeInterval: MenuPanelHover.grace + 0.01, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.finishHoverClose(pointerInside: self.pointerInsideMenuPanel())
+        }
+        hoverCloseTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func finishHoverClose(pointerInside: Bool) {
+        let wasPreview = hover.mode == .preview
+        hover.tick(now: ProcessInfo.processInfo.systemUptime, pointerInside: pointerInside)
+        if wasPreview, hover.mode == .hidden { hidePanel() }
+    }
+
+    private func cancelHoverClose() {
+        hoverCloseTimer?.invalidate()
+        hoverCloseTimer = nil
+    }
+
+    private func pointerInsideMenuPanel() -> Bool {
+        let mouse = NSEvent.mouseLocation
+        if let button = statusItem.button, let window = button.window,
+           window.convertToScreen(button.convert(button.bounds, to: nil)).contains(mouse) { return true }
+        return panel?.isVisible == true && panel?.frame.contains(mouse) == true
+    }
+
+    private func contextMenuWillOpen() {
+        hidePanel()
+        hover.beginMenu()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu === contextMenu { contextMenuWillOpen() }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        if menu === contextMenu { hover.endMenu() }
     }
 
     // MARK: 面板
@@ -255,6 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         h.frame = fx.bounds
         h.autoresizingMask = [.width, .height]
         fx.addSubview(h)
+        if hoverEnabled { panelHoverTracking.attach(to: fx) }
         p.contentView = fx
         host = h
         panel = p
@@ -283,6 +359,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func hidePanel() {
+        cancelHoverClose()
+        hover.hide()
         panel?.orderOut(nil)
         model.showsSettings = false
         if let m = outsideMonitor { NSEvent.removeMonitor(m); outsideMonitor = nil }
@@ -298,6 +376,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             height = min(height, floor(CGFloat(value)))
         }
         return NSSize(width: Self.mainPanelSize.width, height: height)
+    }
+
+    /// Hosted smoke: drive the same AppKit tracking callbacks with a fixture, without moving the host mouse.
+    private func debugHoverLifecycle() {
+        guard let button = statusItem.button else { return }
+        func send(_ type: NSEvent.EventType, _ tracker: HoverTracking) {
+            guard let event = NSEvent.enterExitEvent(with: type, location: .zero, modifierFlags: [],
+                                                    timestamp: ProcessInfo.processInfo.systemUptime,
+                                                    windowNumber: button.window?.windowNumber ?? 0,
+                                                    context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)
+            else { return }
+            if type == .mouseEntered { tracker.mouseEntered(with: event) }
+            else { tracker.mouseExited(with: event) }
+        }
+        send(.mouseEntered, itemHoverTracking)
+        let preview = panel?.isVisible == true && hover.mode == .preview
+        send(.mouseExited, itemHoverTracking)
+        let grace = hover.deadline != nil
+        send(.mouseEntered, panelHoverTracking)
+        let crossed = panel?.isVisible == true && hover.deadline == nil
+        clicked(button)
+        let pinned = panel?.isVisible == true && hover.mode == .pinned
+        send(.mouseExited, panelHoverTracking)
+        let held = hover.deadline == nil
+        contextMenuWillOpen()
+        send(.mouseEntered, itemHoverTracking)
+        let menuSafe = panel?.isVisible == false && hover.menuOpen
+        hover.endMenu()
+        send(.mouseEntered, itemHoverTracking)
+        send(.mouseExited, panelHoverTracking)
+        cancelHoverClose()
+        DispatchQueue.main.asyncAfter(deadline: .now() + MenuPanelHover.grace + 0.03) { [weak self] in
+            guard let self else { return }
+            self.finishHoverClose(pointerInside: false)
+            let dismissed = self.panel?.isVisible == false
+            let ok = preview && grace && crossed && pinned && held && menuSafe && dismissed
+            print("DEBUG_HOVER_LIFECYCLE \(ok ? "ok" : "failed") preview=\(preview) grace=\(grace) crossed=\(crossed) pinned=\(pinned) held=\(held) menu=\(menuSafe) dismissed=\(dismissed)")
+            fflush(stdout)
+        }
     }
 
     /// CI：使用齿轮与返回共用的动作，核对服务开关、窗口标识和位置。
@@ -506,6 +623,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if panel?.isVisible != true { showPanel(from: statusItem.button) }
         guard panel?.isVisible == true else { return }
         model.showsSettings = true
+        cancelHoverClose()
+        hover.pin() // Settings/export should survive pointer departure.
         panel?.makeKey()
         loadCodexModelActivity()
     }
