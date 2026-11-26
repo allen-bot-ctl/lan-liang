@@ -48,7 +48,7 @@ private struct UsageReportDrawing {
         let scale = 2
         guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil,
             pixelsWide: Int(width) * scale, pixelsHigh: Int(height) * scale,
-            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, colorSpaceName: .deviceRGB,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
             bytesPerRow: 0, bitsPerPixel: 0),
             let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
             throw CocoaError(.fileWriteUnknown)
