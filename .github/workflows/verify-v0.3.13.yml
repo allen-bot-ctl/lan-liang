@@ -1,0 +1,65 @@
+name: Verify v0.3.13 AppKit menu-bar CPU and layout
+on:
+  push:
+    branches: [verify/v0.3.13]
+    paths: [.github/workflows/verify-v0.3.13.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'allen-bot-ctl/lan-liang' && github.ref_name == 'verify/v0.3.13'
+    runs-on: macos-15-intel
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: af0cd86478c9c2eeeb9028005cd214e3e78f06eb
+          persist-credentials: false
+      - name: Confirm exact tree and Intel runner
+        run: |
+          test "$(git rev-parse HEAD)" = af0cd86478c9c2eeeb9028005cd214e3e78f06eb
+          test "$(git rev-parse HEAD^{tree})" = 878206e5f7eff880d780947ce83c1571620bef04
+          test "$(uname -m)" = x86_64
+      - name: Full Swift unit tests
+        run: TZ=UTC swift test
+      - name: Build without embedded OAuth keys
+        run: scripts/build.sh 0.3.13
+      - name: Measure AppKit menu rendering CPU and duplicate updates
+        run: bash scripts/ci_v0313_menubar_cpu.sh
+      - name: Check single/dual size and actual status item screenshots
+        run: bash scripts/ci_v039.sh
+      - name: Upload synthetic visual and CPU evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: menubar-intel-verification
+          path: |
+            shots/v0313/
+            shots/menubar-v039/
+  baseline:
+    if: github.repository == 'allen-bot-ctl/lan-liang' && github.ref_name == 'verify/v0.3.13'
+    runs-on: macos-15-intel
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: af0cd86478c9c2eeeb9028005cd214e3e78f06eb
+          persist-credentials: false
+      - name: Measure hosted v0.3.12 idle comparator
+        shell: bash
+        run: |
+          set -euo pipefail
+          source ./project.env
+          work="$(mktemp -d)"
+          curl -fsSL --retry 2 -o "$work/old.zip" "https://github.com/$GITHUB_REPOSITORY/releases/download/v0.3.12/${NAME}-0.3.12-mac-universal.zip"
+          echo "cfe534926af3dd5e17d927709c9773cb02d9896cdf0ff43cb55c471e614b8e35  $work/old.zip" | shasum -a 256 -c
+          /usr/bin/ditto -x -k "$work/old.zip" "$work/old"
+          LANLIANG_FAKE="$PWD/fixtures/normal.json" "$work/old/$NAME.app/Contents/MacOS/$NAME" --debug-services=codex,gemini --debug-appearance=dark >"$work/output.log" 2>&1 &
+          pid=$!
+          trap 'kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          sleep 2
+          read_cpu() { ps -p "$pid" -o time= | awk -F: '{ print ($1*60)+$2 }'; }
+          before="$(read_cpu)"
+          sleep 12
+          after="$(read_cpu)"
+          awk -v a="$before" -v b="$after" 'BEGIN { printf "HOSTED_BASELINE v0.3.12 idle_wall=12s cpu_seconds=%.3f core_percent=%.3f\n", b-a, (b-a)/12*100 }'
