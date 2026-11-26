@@ -1,0 +1,77 @@
+name: Probe macOS legacy Keychain no-UI behavior
+on:
+  push:
+    branches: ['verify/v0311-keychain-probe']
+    paths: ['.github/workflows/verify-v0311-keychain-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: macos-15-intel
+    timeout-minutes: 8
+    steps:
+      - name: Probe a disposable locked Keychain, no real credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          kc="$tmp/lanliang-probe.keychain-db"
+          cleanup() { security delete-keychain "$kc" >/dev/null 2>&1 || true; rm -rf "$tmp"; }
+          trap cleanup EXIT
+          cat >"$tmp/probe.swift" <<'SWIFT'
+          import Foundation
+          import Security
+          import LocalAuthentication
+          let args = CommandLine.arguments
+          var storage: SecKeychain?
+          guard SecKeychainOpen(args[1], &storage) == errSecSuccess, let keychain = storage else {
+              print("PROBE_SETUP keychain_open_failed")
+              exit(1)
+          }
+          let context = LAContext()
+          context.interactionNotAllowed = true
+          var query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                      kSecAttrService as String: "lanliang-ci-fixture",
+                                      kSecAttrAccount as String: "synthetic-account",
+                                      kSecMatchSearchList as String: [keychain],
+                                      kSecReturnData as String: true,
+                                      kSecMatchLimit as String: kSecMatchLimitOne]
+          if args[2] == "current" {
+              query[kSecUseAuthenticationContext as String] = context
+          } else if args[2] == "legacy-fail" {
+              query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+          } else {
+              let status = SecKeychainSetUserInteractionAllowed(false)
+              guard status == errSecSuccess else {
+                  print("PROBE_SETUP interaction_control_failed")
+                  exit(2)
+              }
+          }
+          var out: CFTypeRef?
+          let status = SecItemCopyMatching(query as CFDictionary, &out)
+          print("KEYCHAIN_PROBE \(args[2]) status=\(status) gotData=\(out != nil)")
+          SWIFT
+          xcrun swiftc "$tmp/probe.swift" -o "$tmp/probe"
+          password="fixture-only-$(uuidgen)"
+          security create-keychain -p "$password" "$kc"
+          security unlock-keychain -p "$password" "$kc"
+          security add-generic-password -s lanliang-ci-fixture -a synthetic-account -w not-a-credential -T "$tmp/probe" "$kc"
+          python3 - "$tmp/probe" "$kc" <<'PY'
+          import subprocess, sys, time
+          binary, keychain = sys.argv[1:]
+          def run(label, mode):
+              started = time.monotonic()
+              try:
+                  p = subprocess.run([binary,keychain,mode],capture_output=True,text=True,timeout=5)
+              except subprocess.TimeoutExpired:
+                  print(f"RESULT {label} timeout",flush=True)
+                  return ''
+              print(f"RESULT {label} {p.stdout.strip()} elapsed={time.monotonic()-started:.2f}",flush=True)
+              return p.stdout
+          ok = run("unlocked_control", "current")
+          if "status=0 gotData=true" not in ok:
+              raise SystemExit("Unlocked control did not establish working test item")
+          subprocess.run(["security","lock-keychain",keychain],check=True)
+          for mode in ("current", "legacy-fail", "process-fail"):
+              run("locked_"+mode, mode)
+          PY
