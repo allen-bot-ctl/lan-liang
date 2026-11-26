@@ -1,0 +1,79 @@
+name: Compare v0.3.12 synthetic active WAL cost
+on:
+  push:
+    branches: [verify/v0.3.12]
+    paths: [.github/workflows/bench-v0.3.12.yml]
+permissions:
+  contents: read
+jobs:
+  measure:
+    if: github.repository == 'allen-bot-ctl/lan-liang' && github.ref_name == 'verify/v0.3.12'
+    runs-on: macos-15-intel
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 71b2435856aee3564ccccee8d664ddffad62f741
+          persist-credentials: false
+      - name: Native synthetic WAL benchmark only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 71b2435856aee3564ccccee8d664ddffad62f741
+          f=Tests/LanLiangCoreTests/GeminiHistoryPerformanceTests.swift
+          cat > "$f" <<'SWIFT_FIXTURE'
+          #if canImport(Darwin) && canImport(SQLite3)
+          import Darwin
+          import Foundation
+          import SQLite3
+          import XCTest
+          @testable import LanLiangCore
+          
+          final class GeminiHistoryPerformanceTests: GeminiDBTestCase {
+              private func cpuSeconds() -> Double {
+                  var t = timespec()
+                  precondition(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t) == 0)
+                  return Double(t.tv_sec) + Double(t.tv_nsec) / 1_000_000_000
+              }
+          
+              func testSyntheticActiveWALColdAndWarmMetrics() {
+                  let payload = PB.bytes(3, Data(repeating: 3, count: 2048))
+                  let steps = Array(repeating: payload + step(1, at: d1), count: 180)
+                  let wal = Array(repeating: payload + step(2, at: d1), count: 600)
+                  for i in 0..<5 { makeDB("antigravity", "clean-\(i)", steps: steps) }
+                  let active = makeDB("antigravity", "active", steps: steps, walExtra: wal)
+                  let scanner = GeminiHistoryScanner(home: home, cacheURL: GeminiUsageCacheFile.url(home: home), calendar: utc)
+                  let baseTotal: Int64 = 6 * 180 + 600 * 2
+                  let walBytes = GeminiHistoryScanner.signature(active.path)?.walSize ?? 0
+                  XCTAssertGreaterThan(walBytes, 1_000_000)
+          
+                  func measured(_ label: String, expected: Int64, freshParses: Int) {
+                      let previousParses = scanner.parseCount
+                      let cpuStart = cpuSeconds()
+                      let history = scanner.scan()
+                      let elapsedCPU = cpuSeconds() - cpuStart
+                      let parses = scanner.parseCount - previousParses
+                      XCTAssertEqual(history.failed, 0)
+                      XCTAssertEqual(history.daily["2026-11-18"], expected)
+                      XCTAssertEqual(parses, freshParses)
+                      print(String(format: "HISTORY_WAL_BENCH %@ wall=%.4fs cpu=%.4fs dbs=%d opens=%d wal_bytes=%lld",
+                                   label, scanner.lastTimings.total, elapsedCPU, history.conversations, parses, walBytes))
+                  }
+          
+                  measured("cold", expected: baseTotal, freshParses: 6)
+                  measured("unchanged", expected: baseTotal, freshParses: 0)
+                  // Append to only the still-open writer; copied WAL data must count and
+                  // untouched siblings must not be reopened.
+                  let writer = open.last
+                  XCTAssertNotNil(writer)
+                  let blob = (payload + step(9, at: d1)).map { String(format: "%02x", $0) }.joined()
+                  let sql = "INSERT INTO steps(idx, step_type, metadata) VALUES(9000, 1, X'\(blob)')"
+                  XCTAssertEqual(sqlite3_exec(writer, sql, nil, nil, nil), SQLITE_OK)
+                  measured("changed-wal", expected: baseTotal + 9, freshParses: 1)
+                  measured("rewarmed", expected: baseTotal + 9, freshParses: 0)
+              }
+          }
+          #endif
+          SWIFT_FIXTURE
+          test "$(git hash-object "$f")" = 01e753b7099f6c54022549539348aec7abbf1176
+          TZ=UTC swift test --filter GeminiHistoryPerformanceTests/testSyntheticActiveWALColdAndWarmMetrics
