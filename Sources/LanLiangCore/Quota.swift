@@ -72,12 +72,15 @@ public struct ServiceSnapshot: Codable, Equatable {
         switch status {
         case .ok: return nil
         case .loading: return hasQuota ? nil : "正在读取…"
-        case .fetchFailed: return "额度获取失败，5 分钟后自动重试"
+        case .fetchFailed:
+            return service == .gemini ? "Gemini 额度获取失败，可重新读取登录后再试"
+                                      : "额度获取失败，5 分钟后自动重试"
         case .loginExpired:
             return service == .codex ? "Codex 登录已过期，在终端运行一次 codex 重新登录"
-                                     : "Gemini 登录已过期，打开一次 Antigravity 后再刷新"
+                                     : "Gemini 登录已过期，请在 Antigravity 登录后重新读取"
         case .apiKeyOnly: return "API Key 账号没有订阅额度"
-        case .notLoggedIn: return "未检测到登录"
+        case .notLoggedIn:
+            return service == .gemini ? "未检测到 Antigravity 登录" : "未检测到登录"
         case .keychainDenied: return "没有钥匙串权限，读不到 Gemini 登录"
         }
     }

@@ -26,7 +26,7 @@ final class LanLiangCoreTests: XCTestCase {
 
     func testMessages() {
         XCTAssertEqual(ServiceSnapshot(status: .loginExpired).message(for: .codex), "Codex 登录已过期，在终端运行一次 codex 重新登录")
-        XCTAssertEqual(ServiceSnapshot(status: .notLoggedIn).message(for: .gemini), "未检测到登录")
+        XCTAssertEqual(ServiceSnapshot(status: .notLoggedIn).message(for: .gemini), "未检测到 Antigravity 登录")
         XCTAssertNil(ServiceSnapshot(status: .ok).message(for: .codex))
     }
 
@@ -526,7 +526,7 @@ final class GeminiTokenCacheTests: XCTestCase {
         }
         XCTAssertEqual(p.keychainReads, 1)   // 本次运行不再反复读钥匙串
         // 文案
-        XCTAssertEqual(ServiceSnapshot(status: .loginExpired).message(for: .gemini), "Gemini 登录已过期，打开一次 Antigravity 后再刷新")
+        XCTAssertEqual(ServiceSnapshot(status: .loginExpired).message(for: .gemini), "Gemini 登录已过期，请在 Antigravity 登录后重新读取")
     }
 
     func testSameKeychainContentDoesNotRetry() async throws {

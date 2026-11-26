@@ -115,7 +115,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateWatcher.onResult = { [weak self] v in self?.setAvailableUpdate(v) }
         _ = updater
         #endif
-        model.onReauthorizeKeychain = { [weak self] in self?.source.allowKeychainAgain(); self?.refresh() }
+        model.onReauthorizeKeychain = { [weak self] in
+            guard let self, self.model.services.gemini else { return }
+            self.source.allowKeychainAgain()
+            self.pendingRefresh = true
+            self.refresh()
+        }
 
         statusItem = makeItem()
         itemHoverTracking.didEnter = { [weak self] in self?.hoverItemEntered() }

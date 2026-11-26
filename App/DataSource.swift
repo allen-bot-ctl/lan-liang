@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import LocalAuthentication
 
 /// 一次刷新的回调：各自到了就各自调用，都在主线程（契约 0.1.5 §5）。
 struct RefreshHandlers {
@@ -77,12 +78,12 @@ enum HTTPFailure: Error { case unauthorized, failed }
 
 private let appVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"
 
-private func send(_ req: URLRequest) async throws -> Data {
+private func send(_ req: URLRequest, forbiddenMeansUnauthorized: Bool = true) async throws -> Data {
     var r = req
     r.timeoutInterval = 20
     let (data, resp) = try await URLSession.shared.data(for: r)
     let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-    if code == 401 || code == 403 { throw HTTPFailure.unauthorized }
+    if code == 401 || (code == 403 && forbiddenMeansUnauthorized) { throw HTTPFailure.unauthorized }
     guard (200..<300).contains(code) else { throw HTTPFailure.failed }
     return data
 }
@@ -215,34 +216,29 @@ final class CodexLive {
 
 // MARK: Gemini（Antigravity 登录）
 
-/// Antigravity 桌面端内置的公开 OAuth 客户端（installed app）。只用于内存里换新令牌。
-/// 值不进仓库（GitHub 推送保护会拦），打包时由 scripts/build.sh 从环境变量
-/// ANTIGRAVITY_CLIENT_ID / ANTIGRAVITY_CLIENT_SECRET 写进 Info.plist；缺失时不换新，过期即提示打开 Antigravity。
-enum AntigravityOAuth {
-    static var clientID: String { (Bundle.main.object(forInfoDictionaryKey: "LLAntigravityClientID") as? String) ?? "" }
-    static var clientSecret: String { (Bundle.main.object(forInfoDictionaryKey: "LLAntigravityClientSecret") as? String) ?? "" }
-}
-
 final class GeminiLive {
-    /// 登录来源与换新都在 GeminiTokenProvider（LanLiangCore）：钥匙串只读，换新结果只写 ~/.lanliang 缓存。
+    // 栏量不携带 OAuth 客户端凭据；只读 Antigravity 当前登录状态。
     private let provider = GeminiTokenProvider(
         home: FileManager.default.homeDirectoryForCurrentUser,
-        keychain: GeminiLive.readKeychain,
-        clientID: AntigravityOAuth.clientID, clientSecret: AntigravityOAuth.clientSecret,
-        transport: { req in
-            let (d, resp) = try await URLSession.shared.data(for: req)
-            return (d, (resp as? HTTPURLResponse)?.statusCode ?? 0)
-        })
+        keychain: { GeminiLive.readKeychain(interactive: true) },
+        noninteractiveKeychain: { GeminiLive.readKeychain(interactive: false) },
+        clientID: "", clientSecret: "",
+        transport: { _ in throw GeminiTokenProvider.TokenError.expired })
 
     func allowKeychainAgain() { provider.allowKeychainAgain() }
 
     /// 只读 Antigravity 存的钥匙串项（gemini / antigravity）；栏量从不写钥匙串。
-    private static func readKeychain() -> GeminiTokenProvider.KeychainRead {
-        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+    private static func readKeychain(interactive: Bool) -> GeminiTokenProvider.KeychainRead {
+        var q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                 kSecAttrService as String: "gemini",
                                 kSecAttrAccount as String: "antigravity",
                                 kSecReturnData as String: true,
                                 kSecMatchLimit as String: kSecMatchLimitOne]
+        if !interactive {
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            q[kSecUseAuthenticationContext as String] = context
+        }
         var out: CFTypeRef?
         switch SecItemCopyMatching(q as CFDictionary, &out) {
         case errSecSuccess: return (out as? Data).map { .found($0) } ?? .notFound
@@ -273,7 +269,7 @@ final class GeminiLive {
         r.setValue("application/json", forHTTPHeaderField: "Accept")
         r.setValue(ua, forHTTPHeaderField: "User-Agent")
         r.httpBody = try JSONSerialization.data(withJSONObject: body)
-        return try await send(r)
+        return try await send(r, forbiddenMeansUnauthorized: false)
     }
 
     /// 用给定令牌查套餐、邮箱和额度，结果写进 snap。
@@ -292,7 +288,7 @@ final class GeminiLive {
                 snap.email = o["email"] as? String
             }
         }
-        guard let project = assist?.project else { snap.status = .fetchFailed; return }
+        guard let project = assist?.project else { throw HTTPFailure.failed }
         let q = try await post("retrieveUserQuotaSummary", token: token,
                                ua: "antigravity/hub/\(v) (aidev_client; os_type=darwin; arch=\(arch))",
                                body: ["project": project])
@@ -300,34 +296,39 @@ final class GeminiLive {
             snap.weekly = parsed.weekly
             snap.fiveHour = parsed.fiveHour
         } else {
-            snap.status = .fetchFailed
+            throw HTTPFailure.failed
         }
     }
 
     func fetch(previous: ServiceSnapshot) async -> ServiceSnapshot {
-        let cred: GeminiCredential, source: GeminiTokenProvider.Source
-        switch provider.load() {
-        case let .found(c, s): cred = c; source = s
-        case .none: return .init(status: .notLoggedIn)
-        case .denied: return .init(status: .keychainDenied)
-        }
-        var snap = previous
-        snap.status = .ok
-        if let id = cred.idToken, let email = JWT.payload(id)?["email"] as? String { snap.email = email }
         do {
-            do {
-                try await query(token: try await provider.accessToken(cred, source: source), into: &snap)
-            } catch HTTPFailure.unauthorized {
-                // 接口 401：换新令牌后重试一次；换新被拒才算登录过期
-                try await query(token: try await provider.accessToken(cred, source: source, force: true), into: &snap)
+            return try await provider.withKeylessAccess { credential in
+                // A successful source may correspond to a different Antigravity account.
+                var snap = ServiceSnapshot(status: .ok)
+                if let id = credential.idToken { snap.email = JWT.payload(id)?["email"] as? String }
+                do {
+                    try await query(token: credential.accessToken, into: &snap)
+                } catch HTTPFailure.unauthorized {
+                    throw GeminiTokenProvider.TokenError.expired
+                }
+                return snap
             }
-        } catch HTTPFailure.unauthorized {
-            snap.status = .loginExpired
+        } catch GeminiTokenProvider.TokenError.notLoggedIn {
+            var snap = previous
+            snap.status = (previous.status == .loginExpired || previous.hasQuota) ? .loginExpired : .notLoggedIn
+            return snap
+        } catch GeminiTokenProvider.TokenError.keychainDenied {
+            var snap = previous
+            snap.status = .keychainDenied
+            return snap
         } catch GeminiTokenProvider.TokenError.expired {
+            var snap = previous
             snap.status = .loginExpired
+            return snap
         } catch {
+            var snap = previous
             snap.status = .fetchFailed
+            return snap
         }
-        return snap
     }
 }

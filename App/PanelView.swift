@@ -368,13 +368,31 @@ struct ServiceSection: View {
                             .frame(maxWidth: .infinity, alignment: snap.hasQuota ? .leading : .center)
                             .padding(.vertical, snap.status == .notLoggedIn ? 24 : 0)
                     }
-                    if snap.status == .keychainDenied {
-                        Button("重新授权", action: onReauthorize)
+                    if service == .gemini && [.loginExpired, .notLoggedIn, .fetchFailed, .keychainDenied].contains(snap.status) {
+                        HStack(spacing: 8) {
+                            if snap.status == .loginExpired || snap.status == .notLoggedIn {
+                                Button(action: openAntigravity) {
+                                    Label("打开 Antigravity", systemImage: "arrow.up.forward.app")
+                                }
+                                .help("通过 Antigravity 完成 Google 登录；栏量不会收集密码")
+                            }
+                            Button(snap.status == .keychainDenied ? "重新授权钥匙串" : "重新读取登录", action: onReauthorize)
+                                .help("主动从 Antigravity 重新读取本机登录并重试额度")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(maxWidth: .infinity)
                     }
                 }
                 .card(th)
             }
         }
+    }
+
+    private func openAntigravity() {
+        let workspace = NSWorkspace.shared
+        if let app = workspace.urlForApplication(withBundleIdentifier: "com.google.antigravity"),
+           workspace.open(app) { return }
+        if let help = URL(string: "https://antigravity.google/docs/install/") { workspace.open(help) }
     }
 }
 
