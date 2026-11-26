@@ -119,7 +119,9 @@ public enum MenuBarLayout {
         let st = style(rowCount: rows.count, large: large)
         let pos = positions(rows, large: large)
         let c = columns(rows, large: large)
-        let w = width(rows, large: large)
+        let singleRow = rows.count == 1
+        let contentWidth = width(rows, large: large)
+        let w = singleRow ? ceil(contentWidth) : contentWidth
         let img = NSImage(size: NSSize(width: w, height: height), flipped: false) { _ in
             let ap = appearance ?? NSAppearance.currentDrawing()
             ap.performAsCurrentDrawingAppearance {
@@ -128,6 +130,11 @@ public enum MenuBarLayout {
                 let label = NSColor.labelColor.usingColorSpace(.sRGB) ?? (dark ? .white : .black)
                 let orange = secondaryColor(dark: dark)
                 let pitch: CGFloat = rows.count == 2 ? 10.5 : 0
+                func aligned(_ point: CGPoint) -> CGPoint {
+                    guard singleRow, let ctx = NSGraphicsContext.current?.cgContext else { return point }
+                    let d = ctx.convertToDeviceSpace(point)
+                    return ctx.convertToUserSpace(CGPoint(x: d.x.rounded(), y: d.y.rounded()))
+                }
                 for (i, row) in rows.enumerated() {
                     // 行中心：两行时上下各偏 pitch/2，整体在菜单栏高度内居中。
                     let cy = height / 2 + (rows.count == 2 ? (i == 0 ? pitch / 2 : -pitch / 2) : 0)
@@ -136,8 +143,10 @@ public enum MenuBarLayout {
                     if let sym = NSImage(systemSymbolName: iconName(row.service), accessibilityDescription: row.service.title)?
                         .withSymbolConfiguration(config) {
                         let s = sym.size
-                        let r = NSRect(x: (c.icon - s.width) / 2, y: cy - s.height / 2, width: s.width, height: s.height)
-                        sym.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1)
+                        let fit = singleRow && s.width > 0 ? min(1, c.icon / s.width) : 1
+                        let size = CGSize(width: s.width * fit, height: s.height * fit)
+                        let origin = aligned(CGPoint(x: (c.icon - size.width) / 2, y: cy - size.height / 2))
+                        sym.draw(in: CGRect(origin: origin, size: size), from: .zero, operation: .sourceOver, fraction: 1)
                     }
                     // 同一行的周剩余和 5 小时数字共用一条基线（按周剩余字体让数字视觉居中，契约 0.1.3 §3）。
                     let base = MenuBarLayout.baseline(rowIndex: i, rowCount: rows.count, height: height, large: large)
@@ -149,7 +158,7 @@ public enum MenuBarLayout {
                         ctx.saveGState()
                         ctx.setFillColor(color.cgColor)
                         ctx.textMatrix = .identity
-                        ctx.textPosition = CGPoint(x: x, y: base)
+                        ctx.textPosition = aligned(CGPoint(x: x, y: base))
                         CTLineDraw(line, ctx)
                         ctx.restoreGState()
                     }
@@ -167,6 +176,7 @@ public enum MenuBarLayout {
             }
             return true
         }
+        if singleRow { img.cacheMode = .never }
         img.isTemplate = false
         img.accessibilityDescription = rows.map { "\($0.service.title) \($0.primary) 5小时 \($0.secondary ?? "无")" }
             .joined(separator: "，")

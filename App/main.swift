@@ -182,6 +182,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private var defaultMenuBarImageScaling = NSImageScaling.scaleProportionallyDown
+
     private func makeItem() -> NSStatusItem {
         clearStaleStatusItemDefaults()
         let it = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -193,6 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             b.action = #selector(clicked(_:))
             b.sendAction(on: [.leftMouseUp, .rightMouseUp])
             b.imagePosition = .imageOnly
+            defaultMenuBarImageScaling = b.imageScaling
             b.title = ""
         }
         return it
@@ -211,19 +214,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 只显示开着的服务（契约 0.3.0 §1）。
     private var rows: [MenuBarGroup] { MenuBarText.rows(codex: model.codex, gemini: model.gemini, selection: model.services) }
 
-    /// 只开了一个服务 → 放大单行（契约 0.3.0 §2）；两个都开时不变。
-    private var largeMenuBar: Bool { model.services.isSingle }
-
-    /// 两家都登录 → 上下两行；只登录一家 → 单行正常字号；只开一个服务 → 单行放大；都没登录 → 栏量图标。
+    /// 两行保留紧凑版；只剩一行时按正常字号、原尺寸展示。
     private func updateMenuBar() {
         guard let b = statusItem.button else { return }
         let rs = rows
-        let large = largeMenuBar
-        // 0.3.2：内容图不是模板图（5 小时剩余画品牌橙），颜色按按钮当前外观解析。
-        if let img = MenuBarLayout.image(rs, height: NSStatusBar.system.thickness, large: large,
+        b.imageScaling = rs.count == 1 ? .scaleNone : defaultMenuBarImageScaling
+        if let img = MenuBarLayout.image(rs, height: NSStatusBar.system.thickness,
                                          appearance: b.effectiveAppearance) {
             b.image = img
-            statusItem.length = ceil(MenuBarLayout.width(rs, large: large)) + itemPadding
+            statusItem.length = ceil(img.size.width) + itemPadding
         } else {
             b.image = symbol("chart.bar.fill", label: "栏量")
             statusItem.length = NSStatusItem.variableLength
@@ -667,12 +666,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let p = panel { print("DEBUG_RECT_PANEL \(top(p.frame))") }
         let rs = rows
         let groups = rs.map { "\($0.service.rawValue):\($0.primary)\($0.secondary.map { "+" + $0 } ?? "")" }
-        let large = largeMenuBar
-        let content = String(format: "%.1f", MenuBarLayout.width(rs, large: large))
-        let style = rs.count >= 2 ? "compact" : (large ? "large" : "single")
+        let content = String(format: "%.1f", MenuBarLayout.width(rs))
+        let style = rs.count >= 2 ? "compact" : "single"
+        if let button = statusItem.button, let image = button.image {
+            let font = MenuBarLayout.style(rowCount: rs.count).primaryFont.pointSize
+            let scale = button.window?.backingScaleFactor ?? 1
+            print("DEBUG_MENUBAR_RENDER font=\(font) scale=\(scale) noResize=\(button.imageScaling == .scaleNone ? 1 : 0) image=\(image.size.width)x\(image.size.height)")
+        }
         let cells = rs.map { "\($0.service.rawValue):\(MenuBarLayout.cellText($0))" }.joined(separator: ",")
         let dark = (statusItem.button?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua) ? 1 : 0
-        print("DEBUG_MENUBAR_WIDTH content=\(content) item=\(Int(itemWidth)) style=\(rs.count >= 2 ? "compact" : (large ? "large" : "single"))")
+        print("DEBUG_MENUBAR_WIDTH content=\(content) item=\(Int(itemWidth)) style=\(rs.count >= 2 ? "compact" : "single")")
         print("DEBUG_MENUBAR_CELLS cells=\(cells.isEmpty ? "fallback" : cells) dark=\(dark) template=\(statusItem.button?.image?.isTemplate == true ? 1 : 0)")
         print("DEBUG_MENUBAR items=\(statusItemCount) visible=\(statusItem.isVisible ? 1 : 0) autosave=\(statusItem.autosaveName ?? "") rows=\(rs.count) content=\(content) item=\(Int(itemWidth)) groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ",")) services=\(model.services.debugText) style=\(style)")
         fflush(stdout)

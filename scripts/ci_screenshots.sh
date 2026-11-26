@@ -220,7 +220,7 @@ chk failed-gemini 'codex:77%,gemini:--' 2
 chk v030-both 'codex:77%,gemini:44%+64' 2
 chk v030-single-codex 'codex:77%' 1
 chk v030-single-gemini 'gemini:44%+64' 1
-for c in v030-both:compact v030-single-codex:large v030-single-gemini:large normal-codex-daily:compact codex-only-codex-daily:single; do
+for c in v030-both:compact v030-single-codex:single v030-single-gemini:single normal-codex-daily:compact codex-only-codex-daily:single; do
   for ap in dark light; do
     l=$(mbline "${c%%:*}" "$ap")
     [ "$(field "$l" style)" = "${c##*:}" ] || { echo "::error::${c%%:*}-$ap 菜单栏样式不对: $l（应为 ${c##*:}）"; exit 1; }
