@@ -374,6 +374,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         pendingRefresh = false
         model.refreshing = true
+        if model.showsSettings { loadCodexModelActivity() }
         if let now = source.fixedNow { model.now = { now } }
         let selection = model.services
         // 两家额度各自到了就各自更新菜单栏和面板（契约 0.1.5 §5）；关掉的服务不请求（契约 0.3.0 §1）。
@@ -506,6 +507,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard panel?.isVisible == true else { return }
         model.showsSettings = true
         panel?.makeKey()
+        loadCodexModelActivity()
+    }
+
+    private func loadCodexModelActivity() {
+        guard model.services.codex else { return }
+        source.loadCodexModels(now: model.now()) { [weak self] data in
+            self?.model.codexModelActivity = data
+            self?.model.loadedCodexModelActivity = true
+        }
     }
 
     private func setLogin(_ on: Bool) {

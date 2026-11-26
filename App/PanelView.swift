@@ -14,6 +14,8 @@ final class PanelModel: ObservableObject {
     @Published var range: TokenRange = .daily
     /// Gemini 本机 Token 历史；nil = 首次扫描没完成。
     @Published var geminiHistory: GeminiHistory? = nil
+    @Published var codexModelActivity: DailyModelWeights? = nil
+    @Published var loadedCodexModelActivity = false
     @Published var refreshing = false
     /// 上次刷新完成的时间（契约 0.2.0 §3）。
     @Published var lastUpdated: Date? = nil

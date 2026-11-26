@@ -98,25 +98,47 @@ public enum ProtoScan {
         return (t.flatMap(timestamp), u.flatMap(usage))
     }
 
-    /// gen_metadata.data：只看字段 1 下的字段 4（用量）和字段 20（键值对，取 last_step_index）。
+    /// gen_metadata.data：读取用量、归属模型和生成日期，不解码会话内容。
     /// 返回 (用量, 响应所在步 = last_step_index + 1)；结构坏或没有调用信息返回 nil。
-    public static func genData(_ b: UnsafeRawBufferPointer) -> (usage: GeminiCallUsage?, step: Int64?)? {
+    public static func genData(_ b: UnsafeRawBufferPointer) -> (usage: GeminiCallUsage?, step: Int64?, model: String?, at: Date?, generationID: Data?)? {
         var call: UnsafeRawBufferPointer?
-        guard forEach(b, { num, f in if num == 1, case .bytes(let s) = f { call = s } }), let c = call else { return nil }
+        var generationID: Data?
+        guard forEach(b, { num, f in
+            if case .bytes(let s) = f {
+                if num == 1 { call = s }
+                if num == 4 && (16...64).contains(s.count) { generationID = Data(s) }
+            }
+        }), let c = call else { return nil }
         var usageBytes: UnsafeRawBufferPointer?
         var step: Int64?
+        var name: String?, config: String?, at: Date?
         let ok = forEach(c) { num, f in
             guard case .bytes(let s) = f else { return }
             if num == 4 { usageBytes = s; return }
+            if num == 19 || num == 21 {
+                if s.count <= 128, let value = String(bytes: s, encoding: .utf8) {
+                    let candidate = ModelDistribution.name(value)
+                    if candidate != ModelDistribution.unknown {
+                        if num == 21 { name = candidate } else { config = candidate }
+                    }
+                }
+                return
+            }
+            if num == 9 {
+                forEach(s) { field, f in
+                    if field == 4, case .bytes(let t) = f { at = timestamp(t) }
+                }
+                return
+            }
             guard num == 20 else { return }
             var k: UnsafeRawBufferPointer?, v: UnsafeRawBufferPointer?
             guard forEach(s, { n2, f2 in
                 if case .bytes(let x) = f2 { if n2 == 1 { k = x } else if n2 == 2 { v = x } }
             }), let key = k, key.elementsEqual("last_step_index".utf8) else { return }
             if let val = v, let str = String(bytes: val, encoding: .utf8),
-               let n = Int64(str.trimmingCharacters(in: .whitespaces)), n >= 0 { step = n + 1 }
+               let n = Int64(str.trimmingCharacters(in: .whitespaces)), n >= 0, n < Int64.max { step = n + 1 }
         }
         guard ok else { return nil }
-        return (usageBytes.flatMap(usage), step)
+        return (usageBytes.flatMap(usage), step, name ?? config, at, generationID)
     }
 }

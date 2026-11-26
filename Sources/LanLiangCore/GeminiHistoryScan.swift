@@ -8,6 +8,7 @@ public struct GeminiUsageCacheFile: Codable, Equatable {
     public struct Entry: Codable, Equatable {
         public var dbSize: Int64, dbMtime: Int64, walSize: Int64, walMtime: Int64
         public var days: [String: Int64]
+        public var modelDays: DailyModelWeights?
     }
     public var version: Int
     public var entries: [String: Entry]
@@ -68,7 +69,8 @@ public final class GeminiHistoryScanner {
     private let cacheURL: URL?
     private let calendar: () -> Calendar
     /// 成功读取的对话：路径 → (签名, 按日)。读取失败的不进缓存。
-    private var cache: [String: (sig: Signature, days: [String: Int64])] = [:]
+    private typealias CachedUsage = (sig: Signature, days: [String: Int64], modelDays: DailyModelWeights?)
+    private var cache: [String: CachedUsage] = [:]
     private var diskLoaded = false
 
     /// 测试用计数：真正复制了几个库、打开了几个副本。
@@ -101,21 +103,27 @@ public final class GeminiHistoryScanner {
             diskLoaded = true
             if let u = cacheURL, let f = GeminiUsageCacheFile.load(u) {
                 for (p, e) in f.entries {
-                    cache[p] = (Signature(dbSize: e.dbSize, dbMtime: e.dbMtime, walSize: e.walSize, walMtime: e.walMtime), e.days)
+                    cache[p] = (Signature(dbSize: e.dbSize, dbMtime: e.dbMtime, walSize: e.walSize, walMtime: e.walMtime), e.days, e.modelDays)
                 }
             }
         }
         guard !cache.isEmpty else { return nil }
         var daily: [String: Int64] = [:]
-        for c in cache.values { for (k, v) in c.days { daily[k, default: 0] += v } }
-        return GeminiHistory(foundDirectory: true, conversations: cache.count, failed: 0, daily: daily)
+        var modelDaily: DailyModelWeights = [:]
+        for c in cache.values {
+            for (k, v) in c.days { daily[k, default: 0] += v }
+            if let models = c.modelDays { ModelDistribution.merge(models, into: &modelDaily) }
+        }
+        let hasModelCache = cache.values.allSatisfy { $0.modelDays != nil }
+        return GeminiHistory(foundDirectory: true, conversations: cache.count, failed: 0,
+                             daily: daily, modelDaily: hasModelCache ? modelDaily : nil)
     }
 
     private func diskFile() -> GeminiUsageCacheFile {
         var entries: [String: GeminiUsageCacheFile.Entry] = [:]
         for (p, c) in cache {
             entries[p] = .init(dbSize: c.sig.dbSize, dbMtime: c.sig.dbMtime, walSize: c.sig.walSize,
-                               walMtime: c.sig.walMtime, days: c.days)
+                               walMtime: c.sig.walMtime, days: c.days, modelDays: c.modelDays)
         }
         return GeminiUsageCacheFile(version: 1, entries: entries)
     }
@@ -148,20 +156,23 @@ public final class GeminiHistoryScanner {
         loadDiskCache()
         let before = diskFile()
         let (found, entries) = list()
-        var next: [String: (sig: Signature, days: [String: Int64])] = [:]
+        var next: [String: CachedUsage] = [:]
         var daily: [String: Int64] = [:]
+        var modelDaily: DailyModelWeights = [:]
         var failed = 0
         for e in entries {
             let key = e.path.path
-            var days: [String: Int64]?
-            if let old = cache[key], old.sig == e.sig {
-                days = old.days
-                next[key] = old
-            } else if let (sig, d) = read(e, &tm) {
-                days = d
-                next[key] = (sig, d)
+            let result: CachedUsage?
+            if let old = cache[key], old.sig == e.sig, old.modelDays != nil {
+                result = old
+            } else {
+                result = read(e, &tm)
             }
-            if let d = days { for (k, v) in d { daily[k, default: 0] += v } } else { failed += 1 }
+            if let result {
+                next[key] = result
+                for (k, v) in result.days { daily[k, default: 0] += v }
+                if let models = result.modelDays { ModelDistribution.merge(models, into: &modelDaily) }
+            } else { failed += 1 }
         }
         cache = next   // 不在目录里的、读取失败的都不留
         if let u = cacheURL {
@@ -170,11 +181,12 @@ public final class GeminiHistoryScanner {
         }
         tm.total = CFAbsoluteTimeGetCurrent() - t0
         lastTimings = tm
-        return GeminiHistory(foundDirectory: found, conversations: entries.count, failed: failed, daily: daily)
+        return GeminiHistory(foundDirectory: found, conversations: entries.count, failed: failed,
+                             daily: daily, modelDaily: modelDaily)
     }
 
     /// 复制（前后签名不一致就重来，最多 3 次）并解析；失败返回 nil。
-    private func read(_ e: Entry, _ tm: inout Timings) -> (Signature, [String: Int64])? {
+    private func read(_ e: Entry, _ tm: inout Timings) -> CachedUsage? {
         guard e.sig.dbSize + e.sig.walSize <= Self.maxBytes else { return nil }
         let fm = FileManager.default
         for _ in 0..<3 {
@@ -196,8 +208,14 @@ public final class GeminiHistoryScanner {
             copyCount += 1
             tm.copy += CFAbsoluteTimeGetCurrent() - tc
             guard Self.signature(e.path.path) == before else { continue }
-            guard let recs = readRecords(db.path, &tm) else { return nil }
-            return (before, GeminiConversation.daily(recs, fallback: before.latest, calendar: calendar()))
+            guard let records = readRecords(db.path, &tm) else { return nil }
+            let cal = calendar()
+            var modelDays: DailyModelWeights = [:]
+            for r in records.generations {
+                let day = DayKey.of(r.at ?? before.latest, calendar: cal)
+                ModelDistribution.append(r.usage.total, model: r.model, day: day, to: &modelDays)
+            }
+            return (before, GeminiConversation.daily(records.forTotals, fallback: before.latest, calendar: cal), modelDays)
         }
         return nil
     }
@@ -206,7 +224,8 @@ public final class GeminiHistoryScanner {
     /// 只读方式（SQLITE_OPEN_READONLY）打不开 WAL 模式的库：只读连接不能新建 -shm，而 -shm 不复制；
     /// immutable=1 又会忽略 -wal 里的数据。所以直接读写方式打开这份私有副本（只开一次），
     /// 并设 query_only 保证不写；原文件始终不碰。
-    func readRecords(_ path: String, _ tm: inout Timings) -> [GeminiCallRecord]? {
+    private func readRecords(_ path: String, _ tm: inout Timings)
+        -> (forTotals: [GeminiCallRecord], generations: [(at: Date?, usage: GeminiCallUsage, model: String?)])? {
         let ts = CFAbsoluteTimeGetCurrent()
         var decode = 0.0
         defer { tm.sqlite += CFAbsoluteTimeGetCurrent() - ts - decode; tm.decode += decode }
@@ -247,23 +266,30 @@ public final class GeminiHistoryScanner {
             guard query("SELECT metadata FROM steps", { b in
                 if let m = ProtoScan.stepMetadata(b), let u = m.usage { out.append(GeminiCallRecord(at: m.at, usage: u)) }
             }) else { return nil }
-            if !out.isEmpty { return out }
         }
-        guard hasGens else { return out }
-        var gens: [(usage: GeminiCallUsage, step: Int64?)] = []
+        guard hasGens else { return (out, []) }
+        var gens: [(usage: GeminiCallUsage, step: Int64?, model: String?, at: Date?, id: Data?)] = []
         guard query("SELECT data FROM gen_metadata", { b in
-            if let g = ProtoScan.genData(b), let u = g.usage { gens.append((u, g.step)) }
-        }) else { return nil }
-        // 退回 gen_metadata 时，时间取 last_step_index + 1 那一步：只按 idx 取那几步的 metadata。
+            if let g = ProtoScan.genData(b), let u = g.usage {
+                gens.append((u, g.step, g.model, g.at, g.generationID))
+            }
+        }) else { return out.isEmpty ? nil : (out, []) }
+        // Don't change the established daily totals: use steps first, or their legacy fallback timestamp.
         var stepAt: [Int64: Date] = [:]
         if hasSteps {
-            for s in Set(gens.compactMap { $0.step }) {
+            for s in Set(gens.compactMap { g in (out.isEmpty || g.at == nil) ? g.step : nil }) {
                 guard query("SELECT metadata FROM steps WHERE idx = ?", bind: s, { b in
                     if let at = ProtoScan.stepMetadata(b)?.at { stepAt[s] = at }
-                }) else { return nil }
+                }) else { return out.isEmpty ? nil : (out, []) }
             }
         }
-        return gens.map { GeminiCallRecord(at: $0.step.flatMap { stepAt[$0] }, usage: $0.usage) }
+        let totals = out.isEmpty ? gens.map { GeminiCallRecord(at: $0.step.flatMap { stepAt[$0] }, usage: $0.usage) } : out
+        var seen = Set<Data>()
+        let models = gens.compactMap { g -> (Date?, GeminiCallUsage, String?)? in
+            if let id = g.id, !seen.insert(id).inserted { return nil }
+            return (g.at ?? g.step.flatMap { stepAt[$0] }, g.usage, g.model)
+        }
+        return (totals, models)
     }
 
     /// 0.1.4 的读法（取 idx+metadata 全量、ProtoMessage 全解码）：只给单测比对逐日结果用。

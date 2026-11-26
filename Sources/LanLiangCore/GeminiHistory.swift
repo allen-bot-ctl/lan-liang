@@ -76,8 +76,9 @@ public struct GeminiHistory: Codable, Equatable {
     /// 读取失败的对话个数。
     public var failed: Int
     public var daily: [String: Int64]
+    public var modelDaily: DailyModelWeights?
 
-    public init(foundDirectory: Bool, conversations: Int, failed: Int, daily: [String: Int64]) {
+    public init(foundDirectory: Bool, conversations: Int, failed: Int, daily: [String: Int64], modelDaily: DailyModelWeights? = nil) {
         self.foundDirectory = foundDirectory; self.conversations = conversations; self.failed = failed; self.daily = daily
     }
 

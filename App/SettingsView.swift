@@ -46,15 +46,24 @@ struct SettingsView: View {
             }
             .frame(height: 40)
             Rectangle().fill(th.line).frame(height: 0.5)
-            ScrollView(.vertical, showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 12) {
-                    servicesCard(th)
-                    summaryCard(th)
-                    generalCard(th)
-                    footer(th)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        servicesCard(th)
+                        summaryCard(th)
+                        generalCard(th)
+                        footer(th)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .onAppear {
+                    if CommandLine.arguments.contains("--debug-show-models") {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            proxy.scrollTo("settings-model-distribution", anchor: .top)
+                        }
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -354,7 +363,9 @@ struct SummaryChart: View {
         let th = Theme(scheme)
         let c = codexDaily, g = geminiDaily
         let both = panel.services.enabled.count >= 2
-        let stacked = StackedSeries.bars(range: range, codex: c, gemini: g, now: panel.now(), calendar: TokenSeries.calendar())
+        let now = panel.now()
+        let calendar = TokenSeries.calendar()
+        let stacked = StackedSeries.bars(range: range, codex: c, gemini: g, now: now, calendar: calendar)
         let bars = stacked.map { $0.bar }
         let stacks = Self.stackMap(stacked, both: both)
         let active = hover ?? Self.debugHover(panel.hoverKey, bars)
@@ -387,6 +398,99 @@ struct SummaryChart: View {
                          stacks: stacks, stackedTip: both && c != nil && g != nil)
                     .frame(height: TokenChartSection.chartHeight)
             }
+            if let first = bars.first {
+                ModelDistributionSection(panel: panel, start: first.key,
+                                         end: DayKey.of(now, calendar: calendar), range: range)
+                    .id("settings-model-distribution")
+            }
         }
+    }
+}
+
+/// 上半部 Token 图与下半部模型占比共用同一个日期范围和卡片。
+struct ModelDistributionSection: View {
+    @ObservedObject var panel: PanelModel
+    let start: String
+    let end: String
+    let range: TokenRange
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let th = Theme(scheme)
+        VStack(alignment: .leading, spacing: 9) {
+            Rectangle().fill(th.line).frame(height: 0.5)
+            HStack(spacing: 8) {
+                Text("模型分布").font(.system(size: 13, weight: .semibold)).foregroundColor(th.ink)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 4)
+                Text(windowTitle).font(.system(size: 10)).foregroundColor(th.ink3)
+            }
+            if panel.services.codex {
+                distribution("Codex", "按本机活跃会话 · 最后使用的模型", data: panel.codexModelActivity,
+                             pending: !panel.loadedCodexModelActivity, color: Theme.accent, theme: th)
+            }
+            if panel.services.gemini {
+                let h = panel.geminiHistory
+                let unavailable = h?.display == .allFailed || h?.display == .noDirectory
+                distribution("Gemini", "按本机 Token", data: unavailable ? nil : h?.modelDaily,
+                             pending: !unavailable && h?.modelDaily == nil,
+                             color: Theme.purple, theme: th)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    var windowTitle: String {
+        switch range {
+        case .daily: return "最近 30 天"
+        case .weekly: return "最近 12 周"
+        case .monthly: return "最近 6 个月"
+        }
+    }
+
+    func distribution(_ name: String, _ basis: String, data: DailyModelWeights?, pending: Bool,
+                      color: Color, theme th: Theme) -> some View {
+        let rows = ModelDistribution.shares(data ?? [:], start: start, through: end)
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Circle().fill(color).frame(width: 5, height: 5)
+                Text(name).font(.system(size: 11, weight: .semibold)).foregroundColor(th.ink)
+                Spacer(minLength: 4)
+                Text(basis).font(.system(size: 10)).foregroundColor(th.ink2)
+            }
+            if rows.isEmpty {
+                Text(pending ? "正在读取本机用量…" : data == nil ? "本机暂无法取得模型数据" : "这段时间没有本机模型记录")
+                    .font(.system(size: 11)).foregroundColor(th.ink3)
+                    .padding(.bottom, 3)
+            } else {
+                ForEach(rows) { row in modelRow(row, color: color, theme: th) }
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 7).fill(th.sel.opacity(0.35)))
+    }
+
+    func modelRow(_ row: ModelDistribution.Share, color: Color, theme th: Theme) -> some View {
+        let fraction = Double(row.tenths) / 1000
+        let percent = row.tenths % 10 == 0 ? "\(row.tenths / 10)%" : "\(row.tenths / 10).\(row.tenths % 10)%"
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Text(row.name).font(.system(size: 11)).foregroundColor(th.ink2)
+                    .lineLimit(1).truncationMode(.middle).help(row.name)
+                Spacer(minLength: 4)
+                Text(percent).font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundColor(th.ink).fixedSize()
+            }
+            GeometryReader { g in
+                Capsule().fill(th.line)
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(color).frame(width: g.size.width * fraction)
+                    }
+            }
+            .frame(height: 3)
+            .accessibilityHidden(true)
+        }
+        .accessibilityElement(children: .combine)
     }
 }

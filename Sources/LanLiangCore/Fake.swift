@@ -9,6 +9,7 @@ public struct FakeData: Codable, Equatable {
     public var official: [String: Int64]?
     /// Gemini 本机 Token 历史；nil = 首次扫描没完成（面板显示「正在统计…」）。
     public var geminiHistory: GeminiHistory?
+    public var codexModelActivity: DailyModelWeights?
 
     public static func decode(_ data: Data) throws -> FakeData {
         let d = JSONDecoder()

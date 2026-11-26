@@ -21,6 +21,7 @@ protocol DataSource: AnyObject {
     func allowKeychainAgain()
     /// Gemini 本机 Token 历史：后台串行扫描，结果回主线程；扫描还在跑时不再新起。
     func refreshGeminiHistory(completion: @escaping (GeminiHistory) -> Void)
+    func loadCodexModels(now: Date, completion: @escaping (DailyModelWeights?) -> Void)
 }
 
 func makeDataSource() -> DataSource {
@@ -63,6 +64,11 @@ final class FakeSource: DataSource {
               let h = f.geminiHistory else { return }
         DispatchQueue.main.async { completion(h) }
     }
+    func loadCodexModels(now: Date, completion: @escaping (DailyModelWeights?) -> Void) {
+        let data = load()?.codexModelActivity
+        DispatchQueue.main.async { completion(data) }
+    }
+
 }
 
 // MARK: - 真实数据（只读 ~/.codex、~/.gemini、钥匙串；只写自己的 ~/.lanliang）
@@ -131,12 +137,31 @@ final class LiveSource: DataSource {
         }
     }
 
+    private let modelActivityQueue = DispatchQueue(label: "lanliang.codex-model-activity", qos: .utility)
+    private var modelActivityBusy = false
+
+    func loadCodexModels(now: Date, completion: @escaping (DailyModelWeights?) -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !modelActivityBusy else { return }
+        modelActivityBusy = true
+        modelActivityQueue.async { [weak self] in
+            let cal = TokenSeries.calendar()
+            let since = cal.date(byAdding: .month, value: -5, to: cal.dateInterval(of: .month, for: now)!.start)!
+            let db = CodexCredential.home().appendingPathComponent("state_5.sqlite")
+            let activity = CodexModelActivity.read(db: db, since: since, now: now, calendar: cal)
+            DispatchQueue.main.async { [weak self] in
+                self?.modelActivityBusy = false
+                completion(activity)
+            }
+        }
+    }
+
 }
 
 // MARK: Codex
 
 final class CodexLive {
-    /// 只读 ~/.codex/auth.json 取登录（不读 ~/.codex 下其他任何东西）。
+    /// 额度模块只读 auth.json 取登录；模型分布是独立的只读统计。
     /// 额度一回来就通过 onQuota 交出去；返回值是之后拉到的官方每日用量（nil = 失败或没登录）。
     func fetch(previous: ServiceSnapshot, onQuota: (ServiceSnapshot) -> Void) async -> [String: Int64]? {
         guard let data = FileManager.default.contents(atPath: CodexCredential.authFile().path) else {

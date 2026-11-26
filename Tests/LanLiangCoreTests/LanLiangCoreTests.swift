@@ -848,7 +848,7 @@ final class GeminiHistoryScanTests: GeminiDBTestCase {
 
 final class ProtoScanTests: XCTestCase {
     func scanStep(_ d: Data) -> (at: Date?, usage: GeminiCallUsage?)? { d.withUnsafeBytes { ProtoScan.stepMetadata($0) } }
-    func scanGen(_ d: Data) -> (usage: GeminiCallUsage?, step: Int64?)? { d.withUnsafeBytes { ProtoScan.genData($0) } }
+    func scanGen(_ d: Data) -> (usage: GeminiCallUsage?, step: Int64?, model: String?, at: Date?, generationID: Data?)? { d.withUnsafeBytes { ProtoScan.genData($0) } }
 
     func testSkipsOtherFieldsAndMatchesFullDecoder() {
         let t = Date(timeIntervalSince1970: 1_795_000_000)
