@@ -80,6 +80,7 @@ public struct GeminiHistory: Codable, Equatable {
 
     public init(foundDirectory: Bool, conversations: Int, failed: Int, daily: [String: Int64], modelDaily: DailyModelWeights? = nil) {
         self.foundDirectory = foundDirectory; self.conversations = conversations; self.failed = failed; self.daily = daily
+        self.modelDaily = modelDaily
     }
 
     public enum Display: Equatable { case noDirectory, empty, allFailed, chart(failed: Int) }
