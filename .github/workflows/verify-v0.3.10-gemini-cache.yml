@@ -1,0 +1,32 @@
+name: Verify v0.3.10 cache across restart
+on:
+  push:
+    branches: ['verify/v0.3.10-gemini-cache']
+    paths: ['.github/workflows/verify-v0.3.10-gemini-cache.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15-intel
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 43ce177d0c3ab8f3229556a7a1c97045b9de08c0
+          persist-credentials: false
+      - name: Exact source and cache regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "43ce177d0c3ab8f3229556a7a1c97045b9de08c0"
+          TZ=UTC swift test
+      - name: Verify zero Keychain reads in a fresh process
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LL_SYNTHETIC_CACHE_HOME="$(mktemp -d)"
+          trap 'rm -rf "$LL_SYNTHETIC_CACHE_HOME"' EXIT
+          export TZ=UTC
+          LL_SYNTHETIC_CACHE_STEP=seed swift test --skip-build --filter GeminiKeylessAccessTests.testCacheAcrossSeparateProcessesWhenRequested
+          LL_SYNTHETIC_CACHE_STEP=verify swift test --skip-build --filter GeminiKeylessAccessTests.testCacheAcrossSeparateProcessesWhenRequested
+          echo 'CACHE_RELAUNCH: second process had zero Keychain reads; synthetic credentials only'
