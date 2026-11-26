@@ -25,19 +25,55 @@ public enum GeminiTokenCache {
         FileManager.default.contents(atPath: file(home: home).path).flatMap(GeminiCredential.parse)
     }
 
+    static func readPrivateAccess(home: URL) -> GeminiCredential? {
+        let fm = FileManager.default
+        let dir = directory(home: home)
+        let path = file(home: home)
+        func isPrivate(_ target: URL, type: FileAttributeType, mode: UInt16) -> Bool {
+            guard let attrs = try? fm.attributesOfItem(atPath: target.path) else { return false }
+            return attrs[.type] as? FileAttributeType == type &&
+                (attrs[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() &&
+                (attrs[.posixPermissions] as? NSNumber)?.uint16Value == mode
+        }
+        guard isPrivate(dir, type: .typeDirectory, mode: 0o700),
+              isPrivate(path, type: .typeRegular, mode: 0o600) else { return nil }
+        return read(home: home)
+    }
+
+    /// Keep only the verified, explicitly expiring access token in the app's private cache.
+    static func rememberVerifiedAccess(_ c: GeminiCredential, home: URL, now: Date) throws {
+        guard let expiry = c.expiry, expiry.timeIntervalSince(now) > 60,
+              !c.accessToken.isEmpty else { return }
+        let trimmed = GeminiCredential(accessToken: c.accessToken, refreshToken: nil,
+                                       expiry: min(expiry, now.addingTimeInterval(3600)), idToken: nil)
+        if readPrivateAccess(home: home) != trimmed {
+            try write(trimmed, home: home)
+        }
+    }
+
+    static func discardRejectedAccess(_ token: String, home: URL) {
+        guard readPrivateAccess(home: home)?.accessToken == token else { return }
+        try? FileManager.default.removeItem(at: file(home: home))
+    }
+
     /// 先写同目录临时文件（600），再 rename 覆盖，读的一方不会看到半个文件。
     public static func write(_ c: GeminiCredential, home: URL) throws {
         let fm = FileManager.default
         let dir = directory(home: home)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let attrs = try fm.attributesOfItem(atPath: dir.path)
+        guard attrs[.type] as? FileAttributeType == .typeDirectory,
+              (attrs[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         let tmp = dir.appendingPathComponent(".gemini-token.\(UUID().uuidString).tmp")
         guard fm.createFile(atPath: tmp.path, contents: c.fileData(), attributes: [.posixPermissions: 0o600]) else {
             throw CocoaError(.fileWriteUnknown)
         }
+        defer { try? fm.removeItem(at: tmp) }
         try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp.path)
         if rename(tmp.path, file(home: home).path) != 0 {
-            try? fm.removeItem(at: tmp)
             throw CocoaError(.fileWriteUnknown)
         }
     }
@@ -125,8 +161,9 @@ public final class GeminiTokenProvider {
     }
 
     /// Tries current credentials with the normal quota request, never the refresh endpoint.
-    /// A background refresh cannot prompt for keychain access. An explicit re-read skips
-    /// the app cache and in-memory credentials; it checks both provider files before one keychain read.
+    /// Background attempts can do at most one noninteractive keychain read and cannot prompt.
+    /// An explicit re-read skips the app cache and in-memory credentials, checks both provider
+    /// files, and then permits one interactive keychain read.
     public func withKeylessAccess<T>(_ query: (GeminiCredential) async throws -> T) async throws -> T {
         let context = locked { () -> (Bool, KeylessOrigin?, GeminiCredential?, Bool) in
             let result = (keylessRereadRequested, keylessPreferred, keylessAcceptedKeychain, keychainDenied)
@@ -157,8 +194,10 @@ public final class GeminiTokenProvider {
                         keylessPreferred = origin
                         if origin == .keychain { keylessAcceptedKeychain = credential }
                     }
+                    try? GeminiTokenCache.rememberVerifiedAccess(credential, home: home, now: now())
                     return result
                 } catch TokenError.expired {
+                    GeminiTokenCache.discardRejectedAccess(credential.accessToken, home: home)
                     rejected = true
                     // A 401 may coincide with Antigravity rotating its credential.
                     // Never retry the same token in this request.
@@ -167,12 +206,19 @@ public final class GeminiTokenProvider {
             return nil
         }
 
+        if !reread, let cached = GeminiTokenCache.readPrivateAccess(home: home) {
+            sawCredential = true
+            if cached.expiry != nil, let result = try await tryCandidates([(.cache, cached)]) {
+                return result
+            }
+        }
+
         var current = files()
         if !reread {
             if let keychainCredential { current.append((.keychain, keychainCredential)) }
-            if let cached = GeminiTokenCache.read(home: home) { current.append((.cache, cached)) }
             if let preferred, let i = current.firstIndex(where: { $0.0 == preferred }), i > 0 {
-                current.insert(current.remove(at: i), at: 0)
+                let first = current.remove(at: i)
+                current.insert(first, at: 0)
             }
         }
         if let result = try await tryCandidates(current) { return result }
@@ -194,10 +240,14 @@ public final class GeminiTokenProvider {
             // Only one no-UI read, after candidate files/cache have failed. A locked keychain
             // here may simply require interaction; leave that decision to the explicit CTA.
             locked { keychainReads += 1 }
-            if case .found(let data) = noninteractiveKeychain(),
-               let credential = GeminiCredential.parse(data),
-               let result = try await tryCandidates([(.keychain, credential)]) {
-                return result
+            switch noninteractiveKeychain() {
+            case .found(let data):
+                if let credential = GeminiCredential.parse(data),
+                   let result = try await tryCandidates([(.keychain, credential)]) {
+                    return result
+                }
+            case .denied: throw TokenError.keychainDenied
+            case .notFound: break
             }
         }
         throw sawCredential ? TokenError.expired : TokenError.notLoggedIn

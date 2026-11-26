@@ -71,7 +71,7 @@ final class GeminiKeylessAccessTests: XCTestCase {
         XCTAssertEqual(p.keychainReads, 0)
     }
 
-    func testExplicitRecoveryBypassesCacheThenRetainsAcceptedKeychainOnlyInMemory() async throws {
+    func testExplicitRecoveryBypassesCacheThenPersistsOnlyVerifiedShortLivedAccess() async throws {
         try GeminiTokenCache.write(credential("stale-cache"), home: home)
         let next = credential("signed-in")
         let p = provider { .found(next.fileData()) }
@@ -80,7 +80,10 @@ final class GeminiKeylessAccessTests: XCTestCase {
         let second = try await p.withKeylessAccess { $0.accessToken }
         XCTAssertEqual([first, second], ["signed-in", "signed-in"])
         XCTAssertEqual(p.keychainReads, 1)
-        XCTAssertEqual(GeminiTokenCache.read(home: home)?.accessToken, "stale-cache")
+        let cached = try XCTUnwrap(GeminiTokenCache.readPrivateAccess(home: home))
+        XCTAssertEqual(cached.accessToken, "signed-in")
+        XCTAssertNil(cached.refreshToken)
+        XCTAssertNil(cached.idToken)
     }
 
     func testExpiryAndDenialRemainDistinctAndQuotaErrorsPropagate() async throws {
@@ -124,6 +127,101 @@ final class GeminiKeylessAccessTests: XCTestCase {
         XCTAssertEqual([first, second, third], ["cached", "current-keychain", "current-keychain"])
         XCTAssertEqual(queried, ["cached", "cached", "current-keychain", "current-keychain"])
         XCTAssertEqual(p.keychainReads, 1)
+    }
+
+    func testRelaunchWithValidCacheUsesZeroKeychainCalls() async throws {
+        var upstream = credential("known-current", expiresIn: 24 * 3600)
+        upstream.idToken = "synthetic-id"
+        let freshData = upstream.fileData()
+        let first = provider(noninteractive: { .found(freshData) })
+        let firstToken = try await first.withKeylessAccess { $0.accessToken }
+        XCTAssertEqual(firstToken, "known-current")
+        XCTAssertEqual(first.keychainReads, 1)
+        let cached = try XCTUnwrap(GeminiTokenCache.readPrivateAccess(home: home))
+        XCTAssertEqual(cached.expiry, now.addingTimeInterval(3600))
+        XCTAssertNil(cached.refreshToken)
+        XCTAssertNil(cached.idToken)
+
+        try write(credential("source-file-should-not-be-used"), index: 0)
+        let restarted = provider(noninteractive: {
+            XCTFail("Relaunch with valid cache must not touch Keychain")
+            return .denied
+        }) {
+            XCTFail("Never ask for interactive access during relaunch")
+            return .denied
+        }
+        let cachedToken = try await restarted.withKeylessAccess { $0.accessToken }
+        XCTAssertEqual(cachedToken, "known-current")
+        XCTAssertEqual(restarted.keychainReads, 0)
+    }
+
+    func testExpiredCacheAllowsOnlySilentFallbackUntilUserActs() async throws {
+        try GeminiTokenCache.write(credential("past", expiresIn: -1), home: home)
+        var interactive = 0
+        let p = provider(noninteractive: { .denied }) {
+            interactive += 1
+            return .found(self.credential("current-after-permission").fileData())
+        }
+        do {
+            _ = try await p.withKeylessAccess { $0.accessToken }
+            XCTFail("Expected explicit keychain authorization state")
+        } catch { XCTAssertEqual(error as? GeminiTokenProvider.TokenError, .keychainDenied) }
+        XCTAssertEqual(interactive, 0)
+        XCTAssertEqual(p.keychainReads, 1)
+        p.allowKeychainAgain()
+        let recovered = try await p.withKeylessAccess { $0.accessToken }
+        XCTAssertEqual(recovered, "current-after-permission")
+        XCTAssertEqual(interactive, 1)
+    }
+
+    func testNetworkFailureLeavesCacheAndNeverOpensKeychain() async throws {
+        try GeminiTokenCache.write(credential("valid"), home: home)
+        let p = provider(noninteractive: {
+            XCTFail("Transport failure must not touch Keychain")
+            return .notFound
+        })
+        do {
+            _ = try await p.withKeylessAccess { _ -> String in throw URLError(.notConnectedToInternet) }
+            XCTFail("Expected quota network error")
+        } catch { XCTAssertEqual((error as? URLError)?.code, .notConnectedToInternet) }
+        XCTAssertEqual(GeminiTokenCache.readPrivateAccess(home: home)?.accessToken, "valid")
+        XCTAssertEqual(p.keychainReads, 0)
+    }
+
+    func testCacheWithoutExpiryAndUnsafePermissionsAreNotTrusted() async throws {
+        var unknown = credential("unknown-expiry")
+        unknown.expiry = nil
+        try GeminiTokenCache.write(unknown, home: home)
+        let p = provider(noninteractive: { .found(self.credential("fresh").fileData()) })
+        let selected = try await p.withKeylessAccess { $0.accessToken }
+        XCTAssertEqual(selected, "fresh")
+        try FileManager.default.setAttributes([.posixPermissions: 0o644],
+            ofItemAtPath: GeminiTokenCache.file(home: home).path)
+        XCTAssertNil(GeminiTokenCache.readPrivateAccess(home: home))
+    }
+
+    func testCacheAcrossSeparateProcessesWhenRequested() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let path = env["LL_SYNTHETIC_CACHE_HOME"],
+              let step = env["LL_SYNTHETIC_CACHE_STEP"], ["seed", "verify"].contains(step) else {
+            throw XCTSkip("Run in two separate test processes with an isolated synthetic fixture home.")
+        }
+        let fixtureHome = URL(fileURLWithPath: path)
+        let fresh = credential("synthetic-cross-process")
+        let p = GeminiTokenProvider(home: fixtureHome, keychain: {
+            XCTFail("Never request interactive Keychain in this test")
+            return .denied
+        }, noninteractiveKeychain: {
+            if step == "seed" { return .found(fresh.fileData()) }
+            XCTFail("A new process with valid cache must not touch Keychain")
+            return .denied
+        }, clientID: "", clientSecret: "", transport: { _ in
+            XCTFail("No real OAuth requests in this test")
+            throw CocoaError(.fileNoSuchFile)
+        }, now: { self.now })
+        let result = try await p.withKeylessAccess { $0.accessToken }
+        XCTAssertEqual(result, "synthetic-cross-process")
+        XCTAssertEqual(p.keychainReads, step == "seed" ? 1 : 0)
     }
 
     func testDirectForcedRefreshWithoutClientConfigIsExpired() async throws {

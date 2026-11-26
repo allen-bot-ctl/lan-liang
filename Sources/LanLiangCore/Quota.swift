@@ -81,7 +81,7 @@ public struct ServiceSnapshot: Codable, Equatable {
         case .apiKeyOnly: return "API Key 账号没有订阅额度"
         case .notLoggedIn:
             return service == .gemini ? "未检测到 Antigravity 登录" : "未检测到登录"
-        case .keychainDenied: return "没有钥匙串权限，读不到 Gemini 登录"
+        case .keychainDenied: return "需要钥匙串授权才能重新读取 Gemini 登录"
         }
     }
 }
