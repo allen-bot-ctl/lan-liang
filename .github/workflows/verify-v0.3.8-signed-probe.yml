@@ -1,0 +1,163 @@
+name: Build signed Gemini recovery diagnostic (no publish)
+
+on:
+  push:
+    branches: ['verify/v0.3.8-signed-probe']
+    paths: ['.github/workflows/verify-v0.3.8-signed-probe.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-v0.3.8
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Sign diagnostic; no release
+    if: github.repository == 'allen-bot-ctl/lan-liang' && github.ref == 'refs/heads/verify/v0.3.8-signed-probe' && github.event_name == 'push'
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    env:
+      TAG: v0.3.8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: 0cee5c81062f25cb2d7a6cff38180ff738d1c8a2
+          persist-credentials: false
+
+      - name: Verify approved release commit
+        run: test "$(git rev-parse HEAD)" = "0cee5c81062f25cb2d7a6cff38180ff738d1c8a2"
+
+      - name: Load project.env
+        shell: bash
+        run: |
+          set -euo pipefail
+          source ./project.env
+          {
+            echo "NAME=$NAME"
+            echo "DISPLAY_NAME=$DISPLAY_NAME"
+            echo "VERSION=${TAG#v}"
+          } >> "$GITHUB_ENV"
+
+      - name: Import stable signing certificate
+        shell: bash
+        env:
+          LANLIANG_SIGN_P12: ${{ secrets.LANLIANG_SIGN_P12 }}
+          LANLIANG_SIGN_PASSWORD: ${{ secrets.LANLIANG_SIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$LANLIANG_SIGN_P12" ] || { echo "::error::缺少 LANLIANG_SIGN_P12，正式版必须用稳定签名"; exit 1; }
+          kc="$RUNNER_TEMP/lanliang-sign.keychain-db"
+          kcpass=$(openssl rand -hex 16)
+          echo "$LANLIANG_SIGN_P12" | base64 --decode > "$RUNNER_TEMP/lanliang-sign.p12"
+          security create-keychain -p "$kcpass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpass" "$kc"
+          security import "$RUNNER_TEMP/lanliang-sign.p12" -k "$kc" -P "$LANLIANG_SIGN_PASSWORD" -T /usr/bin/codesign -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          openssl pkcs12 -in "$RUNNER_TEMP/lanliang-sign.p12" -nokeys -passin env:LANLIANG_SIGN_PASSWORD -legacy -out "$RUNNER_TEMP/lanliang-sign.pem" 2>/dev/null \
+            || openssl pkcs12 -in "$RUNNER_TEMP/lanliang-sign.p12" -nokeys -passin env:LANLIANG_SIGN_PASSWORD -out "$RUNNER_TEMP/lanliang-sign.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/lanliang-sign.pem"
+          rm -f "$RUNNER_TEMP/lanliang-sign.p12"
+          security find-identity -p codesigning "$kc"
+          echo "SIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+          echo "SIGN_IDENTITY=LanLiang Self-Signed" >> "$GITHUB_ENV"
+
+      - name: Add sanitized one-shot entry point (runner working copy only)
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          p = Path("App/main.swift")
+          s = p.read_text()
+          before = "let app = NSApplication.shared"
+          assert s.count(before) == 1
+          p.write_text(s.replace(before, """if CommandLine.arguments.contains("--verify-gemini-current-session") {
+              Task.detached {
+                  let snapshot = await GeminiLive().fetch(previous: ServiceSnapshot(status: .notLoggedIn))
+                  let result = snapshot.status == .ok ? (snapshot.hasQuota ? "quota-available" : "quota-empty") : snapshot.status.rawValue
+                  print("GEMINI_PROBE_RESULT \(result)")
+                  fflush(stdout)
+                  exit(0)
+              }
+              dispatchMain()
+          }
+
+          """ + before))
+          PYCODE
+
+      - name: Build universal app, dmg, zip without Gemini OAuth credentials
+        run: env -u ANTIGRAVITY_CLIENT_ID -u ANTIGRAVITY_CLIENT_SECRET scripts/build.sh "$VERSION"
+
+      - name: Require credential-free public packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          archive="dist/${NAME}-${VERSION}-mac-universal.zip"
+          unzip -p "$archive" "${NAME}.app/Contents/Info.plist" > "$tmp/Info.plist"
+          cmp "build/${NAME}.app/Contents/Info.plist" "$tmp/Info.plist"
+          cmp "build/dmg/${NAME}.app/Contents/Info.plist" "$tmp/Info.plist"
+          plutil -lint "$tmp/Info.plist"
+          for key in LLAntigravityClientID LLAntigravityClientSecret; do
+            if /usr/libexec/PlistBuddy -c "Print :$key" "$tmp/Info.plist" >/dev/null 2>&1; then
+              echo "::error::Public package contains forbidden OAuth field $key"
+              exit 1
+            fi
+          done
+          echo "RELEASE: antigravity_oauth=absent"
+
+      - name: Verify stable signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="build/${NAME}.app"
+          codesign -dv --verbose=2 "$app" 2>&1 | tee /tmp/codesign.log
+          grep -q "Authority=LanLiang Self-Signed" /tmp/codesign.log || { echo "::error::不是 LanLiang Self-Signed 签名"; exit 1; }
+          if grep -q "Signature=adhoc" /tmp/codesign.log; then echo "::error::仍是 ad-hoc"; exit 1; fi
+          # Authority 行只在 --verbose=2 才打印；先落文件再 grep，避免 pipefail 下 grep -q 提前退出误判
+          codesign -dv --verbose=2 "$app/Contents/Frameworks/Sparkle.framework" > /tmp/cs-fw.log 2>&1
+          grep -q "Authority=LanLiang Self-Signed" /tmp/cs-fw.log || { echo "::error::Sparkle.framework 未用同一身份签名"; cat /tmp/cs-fw.log; exit 1; }
+          codesign -d -r- "$app" 2>&1 | tee /tmp/dr1.txt
+          grep -q "certificate leaf" /tmp/dr1.txt || { echo "::error::designated 没有 certificate leaf"; exit 1; }
+          if grep -q "cdhash" /tmp/dr1.txt; then echo "::error::designated 仍是 cdhash"; exit 1; fi
+          codesign --verify --deep --strict "$app"
+          cp -R "$app" "$RUNNER_TEMP/again.app"
+          codesign --force --sign "$SIGN_IDENTITY" --timestamp=none --keychain "$SIGN_KEYCHAIN" "$RUNNER_TEMP/again.app"
+          codesign -d -r- "$RUNNER_TEMP/again.app" 2>&1 | grep designated > /tmp/dr2.txt
+          grep designated /tmp/dr1.txt | diff - /tmp/dr2.txt || { echo "::error::两次签名 designated 不同"; exit 1; }
+          echo "RELEASE: designated=$(grep designated /tmp/dr1.txt)"
+          echo "RELEASE: codesign=stable"
+
+      - name: Verify archs, signature, bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="build/${NAME}.app"
+          bin="$app/Contents/MacOS/$NAME"
+          archs=$(lipo -archs "$bin"); echo "RELEASE: lipo=$archs"
+          [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]
+          fw="$app/Contents/Frameworks/Sparkle.framework/Sparkle"
+          echo "RELEASE: sparkle archs=$(lipo -archs "$fw")"
+          codesign -dv --verbose=2 "$app" 2>&1 | tee /tmp/codesign.log
+          if grep -q "runtime" /tmp/codesign.log; then echo "::error::不应开启 hardened runtime"; exit 1; fi
+          otool -L "$bin" > /tmp/otool.txt
+          grep -q "@rpath/Sparkle.framework" /tmp/otool.txt
+          [ "$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist")" = "$VERSION" ]
+          /usr/libexec/PlistBuddy -c "Print :SUFeedURL" "$app/Contents/Info.plist"
+          test -s "$app/Contents/Resources/AppIcon.icns"
+          [ "$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$app/Contents/Info.plist")" = "AppIcon" ]
+          echo "RELEASE: icon=AppIcon.icns $(stat -f%z "$app/Contents/Resources/AppIcon.icns")B"
+          echo "RELEASE: version=$VERSION"
+
+      - name: Store signed test artifact without publishing a release
+        uses: actions/upload-artifact@v4
+        with:
+          name: v038-signed-gemini-diagnostic
+          path: dist/LanLiang-0.3.8-mac-universal.zip
+          if-no-files-found: error
+          retention-days: 2
