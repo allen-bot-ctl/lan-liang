@@ -1,0 +1,44 @@
+name: Verify v0.3.12 availability and idle performance
+
+on:
+  push:
+    branches: [verify/v0.3.12]
+    paths: [.github/workflows/verify-v0.3.12.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-lanliang-v0.3.12
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'allen-bot-ctl/lan-liang' && github.ref_name == 'verify/v0.3.12'
+    runs-on: macos-15-intel
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 71b2435856aee3564ccccee8d664ddffad62f741
+          persist-credentials: false
+      - name: Verify source and runner
+        run: |
+          test "$(git rev-parse HEAD)" = 71b2435856aee3564ccccee8d664ddffad62f741
+          test "$(git rev-parse HEAD^{tree})" = 92f47385246a59094cb805f5995472535913fa18
+          test "$(uname -m)" = x86_64
+      - name: Full Swift unit tests
+        run: TZ=UTC swift test
+      - name: Actual noninteracting Keychain
+        run: bash scripts/ci_v0311_keychain.sh
+      - name: Build application without keys or publication
+        run: scripts/build.sh 0.3.12
+      - name: Native performance probe
+        run: bash scripts/ci_v0312_history_lifecycle.sh
+      - name: Policy regression check
+        shell: bash
+        run: |
+          if grep -rnE '"(archived_)?sessions"|\.jsonl|CodexSessionLog' App Sources; then
+            echo "::error::Code unexpectedly accesses Codex sessions"
+            exit 1
+          fi
