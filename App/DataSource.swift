@@ -240,7 +240,10 @@ final class GeminiLive {
             q[kSecUseAuthenticationContext as String] = context
         }
         var out: CFTypeRef?
-        switch SecItemCopyMatching(q as CFDictionary, &out) {
+        let status = KeychainInteraction.perform(interactive: interactive) {
+            SecItemCopyMatching(q as CFDictionary, &out)
+        }
+        switch status {
         case errSecSuccess: return (out as? Data).map { .found($0) } ?? .notFound
         case errSecItemNotFound: return .notFound
         default: return .denied
