@@ -1,0 +1,29 @@
+name: Verify v0.3.11 native Keychain and cache
+on:
+  push:
+    branches: ['verify/v0.3.11-keychain-guard']
+    paths: ['.github/workflows/verify-v0.3.11-keychain-guard.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15-intel
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ee769155ffa03ed7416ac4015299cb23c20cf855
+          persist-credentials: false
+      - name: Confirm exact source and native locked Keychain behavior
+        run: |
+          test "$(git rev-parse HEAD)" = "ee769155ffa03ed7416ac4015299cb23c20cf855"
+          bash scripts/ci_v0311_keychain.sh
+      - name: Cache state and manual recovery regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          TZ=UTC swift test --filter GeminiKeylessAccessTests
+          export LL_SYNTHETIC_CACHE_HOME="$(mktemp -d)"
+          trap 'rm -rf "$LL_SYNTHETIC_CACHE_HOME"' EXIT
+          LL_SYNTHETIC_CACHE_STEP=seed swift test --skip-build --filter GeminiKeylessAccessTests.testCacheAcrossSeparateProcessesWhenRequested
+          LL_SYNTHETIC_CACHE_STEP=verify swift test --skip-build --filter GeminiKeylessAccessTests.testCacheAcrossSeparateProcessesWhenRequested
