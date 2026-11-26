@@ -1,0 +1,33 @@
+name: Verify v0.3.7 hover and export
+on:
+  push:
+    branches: ['verify/v0.3.7-cpu-export']
+    paths: ['.github/workflows/verify-v0.3.7-cpu-export.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 1d5890d428ca8a9a46e4e3c891de5fea67376fe8
+          persist-credentials: false
+      - name: Exact source and unit tests
+        run: |
+          test "$(git rev-parse HEAD)" = "1d5890d428ca8a9a46e4e3c891de5fea67376fe8"
+          TZ=UTC swift test
+          if grep -rnE '"(archived_)?sessions"|\.jsonl|CodexSessionLog' App Sources; then exit 1; fi
+      - name: Build and verify keyless native package
+        run: |
+          env -u ANTIGRAVITY_CLIENT_ID -u ANTIGRAVITY_CLIENT_SECRET scripts/build.sh 0.3.7
+          if /usr/libexec/PlistBuddy -c 'Print :LLAntigravityClientSecret' build/LanLiang.app/Contents/Info.plist >/dev/null 2>&1; then exit 1; fi
+      - name: Hover lifecycle and usage report PNGs
+        run: bash scripts/ci_v037.sh
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v037-hover-export
+          path: shots/v037/
