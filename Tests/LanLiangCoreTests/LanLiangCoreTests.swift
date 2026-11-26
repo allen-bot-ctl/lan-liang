@@ -21,7 +21,34 @@ final class LanLiangCoreTests: XCTestCase {
         XCTAssertEqual(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .fetchFailed, weekly: w))?.primary, "77%")
         XCTAssertEqual(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .fetchFailed))?.primary, "--")
         XCTAssertEqual(MenuBarText.group(for: .codex, snapshot: ServiceSnapshot(status: .loading))?.primary, "…")
-        XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: ServiceSnapshot(status: .loginExpired, weekly: w))?.primary, "--")
+        XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: ServiceSnapshot(status: .loginExpired, weekly: w))?.primary, "77%*")
+    }
+
+    func testGeminiStaleQuotaStaysVisibleAndMarkedUntilRecovery() {
+        let sampledAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let weekly = QuotaWindow(kind: .weekly, remainingPercent: 77, resetsAt: nil)
+        let short = QuotaWindow(kind: .fiveHour, remainingPercent: 64, resetsAt: nil)
+        var gemini = ServiceSnapshot(status: .ok, weekly: weekly, fiveHour: short, quotaUpdatedAt: sampledAt)
+        for status in [ServiceStatus.keychainUnavailable, .keychainDenied, .loginExpired, .fetchFailed] {
+            gemini.status = status
+            XCTAssertEqual(gemini.quotaUpdatedAt, sampledAt)
+            XCTAssertTrue(gemini.hasStaleQuota)
+            XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: gemini)?.primary, "77%*")
+            XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: gemini)?.secondary, "64*")
+            XCTAssertEqual(PanelText.tabPercent(gemini, service: .gemini), "77%*")
+        }
+        gemini.weekly = nil
+        XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: gemini)?.primary, "64%*")
+        gemini.status = .ok
+        XCTAssertFalse(gemini.hasStaleQuota)
+        XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: gemini)?.primary, "64%")
+
+        let unavailable = ServiceSnapshot(status: .keychainUnavailable)
+        XCTAssertFalse(unavailable.hasStaleQuota)
+        XCTAssertEqual(PanelText.tabPercent(unavailable, service: .gemini), "—")
+        XCTAssertEqual(MenuBarText.group(for: .gemini, snapshot: unavailable)?.primary, "--")
+        XCTAssertTrue(unavailable.message(for: .gemini)?.contains("自动重试") == true)
+        XCTAssertFalse(unavailable.message(for: .gemini)?.contains("授权") == true)
     }
 
     func testMessages() {

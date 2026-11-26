@@ -84,10 +84,10 @@ public enum GeminiTokenCache {
 /// 只有从钥匙串读到时才写缓存；令牌来自缓存时换新结果写回缓存；
 /// 缓存里的 refresh_token 被拒时回钥匙串重读一次，本次运行不再反复读。
 public final class GeminiTokenProvider {
-    public enum KeychainRead: Equatable { case found(Data), notFound, denied }
+    public enum KeychainRead: Equatable { case found(Data), notFound, unavailable, denied }
     public enum Source: Equatable { case antigravityFile, cache }
     public enum Load: Equatable { case found(GeminiCredential, Source), none, denied }
-    public enum TokenError: Error, Equatable { case expired, failed, notLoggedIn, keychainDenied }
+    public enum TokenError: Error, Equatable { case expired, failed, notLoggedIn, keychainUnavailable, keychainDenied }
 
     private let home: URL
     private let keychain: () -> KeychainRead
@@ -145,7 +145,7 @@ public final class GeminiTokenProvider {
             guard let c = GeminiCredential.parse(d) else { return .none }
             try? GeminiTokenCache.write(c, home: home)
             return .found(c, .cache)
-        case .notFound: return .none
+        case .notFound, .unavailable: return .none
         case .denied: return .denied
         }
     }
@@ -232,6 +232,7 @@ public final class GeminiTokenProvider {
                     return result
                 }
             case .denied: throw TokenError.keychainDenied
+            case .unavailable: throw TokenError.keychainUnavailable
             case .notFound: break
             }
         } else if denied {
@@ -246,7 +247,7 @@ public final class GeminiTokenProvider {
                    let result = try await tryCandidates([(.keychain, credential)]) {
                     return result
                 }
-            case .denied: throw TokenError.keychainDenied
+            case .unavailable, .denied: throw TokenError.keychainUnavailable
             case .notFound: break
             }
         }

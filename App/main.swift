@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Combine
 import ServiceManagement
 #if canImport(Sparkle)
 import Sparkle
@@ -68,10 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let panelHoverTracking = HoverTracking()
     private var hover = MenuPanelHover()
     private var hoverCloseTimer: Timer?
-    private var hoverEnabled: Bool { !isDebug || args.contains("--debug-hover-lifecycle") }
+    private var hoverEnabled: Bool { !isDebug || args.contains("--debug-hover-lifecycle") || args.contains("--debug-history-lifecycle") }
     private let contextMenu = NSMenu()
     private let loginItem = NSMenuItem(title: "登录时启动", action: #selector(toggleLogin), keyEquivalent: "")
     private var timer: Timer?
+    private var historyTimer: Timer?
+    private var historyGate = GeminiHistoryWorkGate()
+    private var historyCacheRequested = false
+    private var historyTabObservation: AnyCancellable?
+    private var historyDebugStarts = 0
     private var appearanceObservation: NSKeyValueObservation?
     private lazy var source: DataSource = makeDataSource()
     private let args = CommandLine.arguments
@@ -105,8 +111,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         keepTabEnabled()
         if let r = argValue("debug-range"), let v = TokenRange(rawValue: r) { model.range = v }
         model.hoverKey = argValue("debug-hover")
-        model.onRefresh = { [weak self] in self?.refresh() }
+        model.onRefresh = { [weak self] in
+            guard let self else { return }
+            if self.model.showsSettings { self.loadCodexModelActivity() }
+            self.requestGeminiHistory(manual: true)
+            self.refresh()
+        }
+        historyTabObservation = model.$tab.dropFirst().sink { [weak self] tab in
+            // @Published sends before the property changes; inspect the selected tab
+            // after the callback, and only when the panel is on screen.
+            guard let self, tab == .gemini, self.model.tab != tab,
+                  self.panel?.isVisible == true else { return }
+            DispatchQueue.main.async { [weak self] in self?.requestGeminiHistory() }
+        }
         model.appVersion = appVersion
+        model.debugHistoryLoading = args.contains("--debug-loading")
         model.hoverButton = argValue("debug-hover-button")
         if let v = argValue("debug-update") { model.availableUpdate = v }
         model.onCheckUpdates = { [weak self] in self?.checkUpdatesFromPanel() }
@@ -144,10 +163,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if !isDebug { enableLoginOnFirstLaunch() }
         updateMenuBar()
+        loadGeminiHistoryCache()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
 
-        if args.contains("--debug-hover-lifecycle") {
+        if args.contains("--debug-history-lifecycle") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.debugHistoryLifecycle() }
+        } else if args.contains("--debug-hover-lifecycle") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugHoverLifecycle() }
         } else if args.contains("--debug-settings-roundtrip") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugSettingsRoundTrip() }
@@ -241,7 +263,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cancelHoverClose()
         hover.click()
         if hover.mode == .hidden { hidePanel() }
-        else { openMenuPanel(from: sender) }
+        else {
+            openMenuPanel(from: sender)
+            if hover.mode == .pinned, panel?.isVisible == true {
+                requestGeminiHistory()
+                refresh()
+            }
+        }
     }
 
     private func openMenuPanel(from sender: NSButton?) {
@@ -252,7 +280,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !shown.contains(model.tab), let other = shown.first { model.tab = other }
         showPanel(from: sender)
         guard panel?.isVisible == true else { hover.hide(); return }
-        refresh()
     }
 
     private func hoverItemEntered() {
@@ -354,6 +381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         panel.setFrame(NSRect(x: x, y: top - size.height, width: size.width, height: size.height), display: true)
         panel.orderFrontRegardless()
+        model.panelVisible = panel.isVisible
         panel.invalidateShadow()
         if outsideMonitor == nil {
             outsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -366,6 +394,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cancelHoverClose()
         hover.hide()
         panel?.orderOut(nil)
+        model.panelVisible = false
+        historyTimer?.invalidate()
+        historyTimer = nil
+        historyGate.cancelPending()
         model.showsSettings = false
         if let m = outsideMonitor { NSEvent.removeMonitor(m); outsideMonitor = nil }
     }
@@ -418,6 +450,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let ok = preview && grace && crossed && pinned && held && menuSafe && dismissed
             print("DEBUG_HOVER_LIFECYCLE \(ok ? "ok" : "failed") preview=\(preview) grace=\(grace) crossed=\(crossed) pinned=\(pinned) held=\(held) menu=\(menuSafe) dismissed=\(dismissed)")
             fflush(stdout)
+        }
+    }
+
+    /// Native acceptance fixture: run the same startup/hover/timer refresh routes,
+    /// then pin and manually refresh. Only explicit, visible demand starts a scan.
+    private func debugHistoryLifecycle() {
+        guard let button = statusItem.button, model.shownTab == .gemini else {
+            print("DEBUG_HISTORY_LIFECYCLE failed: fixture must start on Gemini")
+            fflush(stdout)
+            return
+        }
+        let startup = historyDebugStarts
+        timer?.fire()
+        hoverItemEntered()
+        let preview = panel?.isVisible == true && hover.mode == .preview
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            let automatic = self.historyDebugStarts
+            self.clicked(button)
+            let pinned = self.panel?.isVisible == true && self.hover.mode == .pinned
+            self.model.onRefresh()
+            self.model.onRefresh()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                let foreground = self.historyDebugStarts
+                self.hidePanel()
+                self.timer?.fire()
+                self.model.onRefresh()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    let hidden = self.historyDebugStarts
+                    let ok = startup == 0 && automatic == 0 && foreground == 1 && hidden == 1 && preview && pinned
+                    print("DEBUG_HISTORY_LIFECYCLE \(ok ? "ok" : "failed") startup=\(startup) automatic=\(automatic) foreground=\(foreground) hidden=\(hidden) preview=\(preview) pinned=\(pinned)")
+                    fflush(stdout)
+                }
+            }
         }
     }
 
@@ -495,7 +560,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         pendingRefresh = false
         model.refreshing = true
-        if model.showsSettings { loadCodexModelActivity() }
         if let now = source.fixedNow { model.now = { now } }
         let selection = model.services
         // 两家额度各自到了就各自更新菜单栏和面板（契约 0.1.5 §5）；关掉的服务不请求（契约 0.3.0 §1）。
@@ -526,12 +590,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.refresh()
                 }
             }))
-        // Gemini 本机历史单独在后台扫，不拖慢额度和菜单栏；Gemini 关掉时不扫。
-        guard selection.gemini else { return }
-        source.refreshGeminiHistory { [weak self] h in
-            guard let self = self, !self.args.contains("--debug-loading") else { return }
-            self.model.geminiHistory = h
+    }
+
+    private func loadGeminiHistoryCache() {
+        guard model.services.gemini, !historyCacheRequested, !args.contains("--debug-loading") else { return }
+        historyCacheRequested = true
+        source.loadCachedGeminiHistory { [weak self] history in
+            guard let self, self.model.geminiHistory == nil else { return }
+            self.model.geminiHistory = history
         }
+    }
+
+    private var geminiHistoryIsVisible: Bool {
+        panel?.isVisible == true && model.services.gemini && (model.showsSettings || model.shownTab == .gemini)
+    }
+
+    /// Called only for deliberate foreground actions. Hover previews, startup, quota
+    /// reconnects and the five-minute timer never open a conversation DB.
+    private func requestGeminiHistory(manual: Bool = false) {
+        guard geminiHistoryIsVisible, !args.contains("--debug-loading"),
+              historyGate.request(now: ProcessInfo.processInfo.systemUptime, manual: manual) else { return }
+        let timer = Timer(timeInterval: GeminiHistoryWorkGate.debounce + 0.01, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.historyTimer = nil
+            guard self.historyGate.start(now: ProcessInfo.processInfo.systemUptime,
+                                         visible: self.geminiHistoryIsVisible) else { return }
+            if self.args.contains("--debug-history-lifecycle") { self.historyDebugStarts += 1 }
+            self.model.historyScanning = true
+            self.source.refreshGeminiHistory { [weak self] history in
+                guard let self else { return }
+                self.historyGate.finish()
+                self.model.geminiHistory = history
+                self.model.historyScanning = false
+            }
+        }
+        historyTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     // MARK: 监听服务（契约 0.3.0 §1）
@@ -557,6 +651,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         keepTabEnabled()
         updateMenuBar()
         if on {
+            loadGeminiHistoryCache()
+            if s == .gemini { requestGeminiHistory() }
+            if s == .codex && model.showsSettings { loadCodexModelActivity() }
             pendingRefresh = true
             refresh()
         }
@@ -631,6 +728,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hover.pin() // Settings/export should survive pointer departure.
         panel?.makeKey()
         loadCodexModelActivity()
+        requestGeminiHistory()
     }
 
     private func loadCodexModelActivity() {

@@ -18,7 +18,8 @@ public enum PanelText {
     }
 
     /// 页签用的额度：有周剩余取周，只有 5 小时取 5 小时；没登录或没有额度为 nil。
-    public static func tabWindow(_ s: ServiceSnapshot) -> QuotaWindow? {
+    public static func tabWindow(_ s: ServiceSnapshot, service: Service? = nil) -> QuotaWindow? {
+        if service == .gemini && s.hasStaleQuota { return s.weekly ?? s.fiveHour }
         switch s.status {
         case .notLoggedIn, .apiKeyOnly, .keychainDenied: return nil
         default: return s.weekly ?? s.fiveHour
@@ -26,8 +27,9 @@ public enum PanelText {
     }
 
     /// 页签靠右的百分比；没有额度为「—」。
-    public static func tabPercent(_ s: ServiceSnapshot) -> String {
-        tabWindow(s).map { MenuBarText.percent($0.remainingPercent) } ?? "—"
+    public static func tabPercent(_ s: ServiceSnapshot, service: Service? = nil) -> String {
+        let suffix = service == .gemini && s.hasStaleQuota ? MenuBarText.staleMark : ""
+        return tabWindow(s, service: service).map { MenuBarText.percent($0.remainingPercent) + suffix } ?? "—"
     }
 }
 

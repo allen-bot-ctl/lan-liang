@@ -20,6 +20,8 @@ protocol DataSource: AnyObject {
     /// selection：关掉的服务不请求、不回调（契约 0.3.0 §1）。
     func refresh(current: (ServiceSnapshot, ServiceSnapshot), selection: ServiceSelection, handlers: RefreshHandlers)
     func allowKeychainAgain()
+    /// 只读取已有磁盘缓存，不扫描本机对话库。缓存存在时回主线程。
+    func loadCachedGeminiHistory(completion: @escaping (GeminiHistory) -> Void)
     /// Gemini 本机 Token 历史：后台串行扫描，结果回主线程；扫描还在跑时不再新起。
     func refreshGeminiHistory(completion: @escaping (GeminiHistory) -> Void)
     func loadCodexModels(now: Date, completion: @escaping (DailyModelWeights?) -> Void)
@@ -60,10 +62,14 @@ final class FakeSource: DataSource {
 
     func allowKeychainAgain() {}
 
+    func loadCachedGeminiHistory(completion: @escaping (GeminiHistory) -> Void) {
+        refreshGeminiHistory(completion: completion)
+    }
+
     func refreshGeminiHistory(completion: @escaping (GeminiHistory) -> Void) {
-        guard let d = FileManager.default.contents(atPath: path), let f = try? FakeData.decode(d),
-              let h = f.geminiHistory else { return }
-        DispatchQueue.main.async { completion(h) }
+        let history = load()?.geminiHistory
+            ?? GeminiHistory(foundDirectory: false, conversations: 0, failed: 0, daily: [:])
+        DispatchQueue.main.async { completion(history) }
     }
     func loadCodexModels(now: Date, completion: @escaping (DailyModelWeights?) -> Void) {
         let data = load()?.codexModelActivity
@@ -108,32 +114,32 @@ final class LiveSource: DataSource {
 
     func allowKeychainAgain() { gemini.allowKeychainAgain() }
 
-    /// 扫描受 QoS 影响很大（老板 Mac：后台 QoS 下 SQLite 读取 20.9 秒，正常 1.5 秒），用 userInitiated。
-    private let historyQueue = DispatchQueue(label: "lanliang.gemini-history", qos: .userInitiated)
+    /// 不与前台操作竞争 CPU；缓存读取和扫描共用队列，避免状态交错。
+    private let historyQueue = DispatchQueue(label: "lanliang.gemini-history", qos: .utility)
     private lazy var historyScanner: GeminiHistoryScanner = {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return GeminiHistoryScanner(home: home, cacheURL: GeminiUsageCacheFile.url(home: home))
     }()
     /// 只在主线程读写。
-    private var historyBusy = false
-    private var historyStarted = false
+    private var historyCallbacks: [(GeminiHistory) -> Void] = []
+    func loadCachedGeminiHistory(completion: @escaping (GeminiHistory) -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        historyQueue.async { [weak self] in
+            guard let cached = self?.historyScanner.loadDiskCache() else { return }
+            DispatchQueue.main.async { completion(cached) }
+        }
+    }
 
     func refreshGeminiHistory(completion: @escaping (GeminiHistory) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard !historyBusy else { return }
-        historyBusy = true
-        let first = !historyStarted
-        historyStarted = true
-        historyQueue.async { [weak self] in
-            guard let self = self else { return }
-            // 启动时先用磁盘缓存立即出图，再扫描变过的对话。
-            if first, let cached = self.historyScanner.loadDiskCache() {
-                DispatchQueue.main.async { completion(cached) }
-            }
-            let r = self.historyScanner.scan()
+        historyCallbacks.append(completion)
+        guard historyCallbacks.count == 1 else { return }
+        historyQueue.async {
+            let result = self.historyScanner.scan()
             DispatchQueue.main.async {
-                self.historyBusy = false
-                completion(r)
+                let callbacks = self.historyCallbacks
+                self.historyCallbacks.removeAll()
+                callbacks.forEach { $0(result) }
             }
         }
     }
@@ -246,7 +252,9 @@ final class GeminiLive {
         switch status {
         case errSecSuccess: return (out as? Data).map { .found($0) } ?? .notFound
         case errSecItemNotFound: return .notFound
-        default: return .denied
+        // 无 UI 的错误码无法证明用户拒绝；系统会话/钥匙串也可能暂不可交互。
+        case errSecUserCanceled, errSecAuthFailed: return interactive ? .denied : .unavailable
+        default: return .unavailable
         }
     }
 
@@ -314,11 +322,16 @@ final class GeminiLive {
                 } catch HTTPFailure.unauthorized {
                     throw GeminiTokenProvider.TokenError.expired
                 }
+                snap.quotaUpdatedAt = Date()
                 return snap
             }
         } catch GeminiTokenProvider.TokenError.notLoggedIn {
             var snap = previous
             snap.status = (previous.status == .loginExpired || previous.hasQuota) ? .loginExpired : .notLoggedIn
+            return snap
+        } catch GeminiTokenProvider.TokenError.keychainUnavailable {
+            var snap = previous
+            snap.status = .keychainUnavailable
             return snap
         } catch GeminiTokenProvider.TokenError.keychainDenied {
             var snap = previous

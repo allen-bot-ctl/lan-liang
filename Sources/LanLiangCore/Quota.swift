@@ -41,7 +41,7 @@ public enum Service: String, CaseIterable, Codable {
 
 /// 服务状态（契约 §4 状态表）。
 public enum ServiceStatus: String, Codable, Equatable {
-    case ok, loading, fetchFailed, loginExpired, apiKeyOnly, notLoggedIn, keychainDenied
+    case ok, loading, fetchFailed, loginExpired, apiKeyOnly, notLoggedIn, keychainUnavailable, keychainDenied
 }
 
 /// 一个服务当前的全部数据；额度保留上次成功值。
@@ -56,16 +56,24 @@ public struct ServiceSnapshot: Codable, Equatable {
     public var planIsLive: Bool?
     public var weekly: QuotaWindow?
     public var fiveHour: QuotaWindow?
+    /// 上次成功获取额度的时间，而不是最近一次刷新尝试的时间。
+    public var quotaUpdatedAt: Date?
 
     public init(status: ServiceStatus, email: String? = nil, plan: String? = nil, subscriptionUntil: Date? = nil,
                 weekly: QuotaWindow? = nil, fiveHour: QuotaWindow? = nil,
-                planRaw: String? = nil, planIsLive: Bool? = nil) {
+                planRaw: String? = nil, planIsLive: Bool? = nil, quotaUpdatedAt: Date? = nil) {
         self.status = status; self.email = email; self.plan = plan
         self.planRaw = planRaw; self.planIsLive = planIsLive
         self.subscriptionUntil = subscriptionUntil; self.weekly = weekly; self.fiveHour = fiveHour
+        self.quotaUpdatedAt = quotaUpdatedAt
     }
 
     public var hasQuota: Bool { weekly != nil || fiveHour != nil }
+
+    /// Gemini 暂时拿不到新额度时，旧值仅供参考。
+    public var hasStaleQuota: Bool {
+        hasQuota && [.fetchFailed, .loginExpired, .keychainUnavailable, .keychainDenied].contains(status)
+    }
 
     /// 面板额度区的提示文字（红字或灰字）；nil 表示不显示提示。
     public func message(for service: Service) -> String? {
@@ -81,6 +89,7 @@ public struct ServiceSnapshot: Codable, Equatable {
         case .apiKeyOnly: return "API Key 账号没有订阅额度"
         case .notLoggedIn:
             return service == .gemini ? "未检测到 Antigravity 登录" : "未检测到登录"
+        case .keychainUnavailable: return "暂时无法在后台读取 Gemini 登录，栏量会自动重试"
         case .keychainDenied: return "需要钥匙串授权才能重新读取 Gemini 登录"
         }
     }
@@ -94,6 +103,7 @@ public struct MenuBarGroup: Equatable {
 }
 
 public enum MenuBarText {
+    public static let staleMark = "*"
     public static func percent(_ v: Double) -> String { "\(Int(v.rounded()))%" }
     /// 5 小时剩余：只写数字，不带 %（契约 0.1.2 §2）。
     public static func number(_ v: Double) -> String { "\(Int(v.rounded()))" }
@@ -110,10 +120,20 @@ public enum MenuBarText {
     }
 
     public static func group(for service: Service, snapshot s: ServiceSnapshot) -> MenuBarGroup? {
+        if service == .gemini && s.hasStaleQuota {
+            // 菜单栏无空间显示说明；两列旧值都加星，面板写明「上次额度（非实时）」。
+            if let weekly = s.weekly {
+                return MenuBarGroup(service: service, primary: percent(weekly.remainingPercent) + staleMark,
+                                    secondary: s.fiveHour.map { number($0.remainingPercent) + staleMark })
+            }
+            if let fiveHour = s.fiveHour {
+                return MenuBarGroup(service: service, primary: percent(fiveHour.remainingPercent) + staleMark, secondary: nil)
+            }
+        }
         switch s.status {
         case .notLoggedIn, .apiKeyOnly, .keychainDenied:
             return nil
-        case .loginExpired:
+        case .loginExpired, .keychainUnavailable:
             return MenuBarGroup(service: service, primary: "--", secondary: nil)
         case .ok, .loading, .fetchFailed:
             guard s.hasQuota else {

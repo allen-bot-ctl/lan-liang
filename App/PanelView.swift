@@ -12,8 +12,11 @@ final class PanelModel: ObservableObject {
     @Published var official: [String: Int64]? = nil
     @Published var officialLoaded = false
     @Published var range: TokenRange = .daily
-    /// Gemini 本机 Token 历史；nil = 首次扫描没完成。
+    /// Gemini 本机 Token 历史；nil = 尚无缓存或扫描结果。
     @Published var geminiHistory: GeminiHistory? = nil
+    @Published var historyScanning = false
+    @Published var panelVisible = false
+    var debugHistoryLoading = false
     @Published var codexModelActivity: DailyModelWeights? = nil
     @Published var loadedCodexModelActivity = false
     @Published var refreshing = false
@@ -122,7 +125,8 @@ struct HeaderBar: View {
                     .lineLimit(1).fixedSize()
             }
             HStack(spacing: 2) {
-                HeaderButton(id: "refresh", symbol: "arrow.clockwise", spinning: model.refreshing, dot: false,
+                HeaderButton(id: "refresh", symbol: "arrow.clockwise",
+                             spinning: model.panelVisible && !model.showsSettings && model.refreshing, dot: false,
                              hovered: $hovered, forced: model.hoverButton, action: { model.onRefresh() })
                 HeaderButton(id: "update", symbol: "arrow.down.circle", spinning: false, dot: model.availableUpdate != nil,
                              hovered: $hovered, forced: model.hoverButton, action: { model.onCheckUpdates() })
@@ -226,14 +230,14 @@ struct ServiceTab: View {
 
     var body: some View {
         let th = Theme(scheme)
-        let w = PanelText.tabWindow(snap)
+        let w = PanelText.tabWindow(snap, service: service)
         Button(action: action) {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
                     Image(systemName: service == .codex ? "terminal" : "sparkles").font(.system(size: 14))
                     Text(service.title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                     Spacer(minLength: 2)
-                    Text(PanelText.tabPercent(snap)).font(.system(size: 10, weight: .medium).monospacedDigit())
+                    Text(PanelText.tabPercent(snap, service: service)).font(.system(size: 10, weight: .medium).monospacedDigit())
                         .foregroundColor(th.ink2).lineLimit(1).fixedSize()
                 }
                 QuotaBar(fraction: (w?.remainingPercent ?? 0) / 100,
@@ -270,7 +274,7 @@ struct SingleServiceHeader: View {
 
     var body: some View {
         let th = Theme(scheme)
-        let showAccount = snap.status != .notLoggedIn && snap.status != .keychainDenied
+        let showAccount = snap.status != .notLoggedIn && snap.status != .keychainUnavailable && snap.status != .keychainDenied
         let days = daysLeft
         HStack(spacing: 8) {
             ZStack {
@@ -329,7 +333,7 @@ struct ServiceSection: View {
     var body: some View {
         let th = Theme(scheme)
         let sub = subscription
-        let showAccount = snap.status != .notLoggedIn && snap.status != .keychainDenied && (snap.plan != nil || snap.email != nil)
+        let showAccount = snap.status != .notLoggedIn && snap.status != .keychainUnavailable && snap.status != .keychainDenied && (snap.plan != nil || snap.email != nil)
         VStack(alignment: .leading, spacing: 8) {
             if !single, showAccount || sub != nil {
                 HStack(spacing: 8) {
@@ -354,11 +358,18 @@ struct ServiceSection: View {
                 .padding(.bottom, 2)
             }
             let msg = snap.message(for: service)
+            let stale = service == .gemini && snap.hasStaleQuota
             if snap.hasQuota || msg != nil || snap.status == .keychainDenied {
                 VStack(alignment: .leading, spacing: single ? 14 : 12) {
                     if snap.hasQuota {
-                        Text("剩余额度").font(.system(size: 13, weight: .semibold)).foregroundColor(th.ink)
-                            .padding(.bottom, -2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(stale ? "上次额度（非实时）" : "剩余额度")
+                                .font(.system(size: 13, weight: .semibold)).foregroundColor(th.ink)
+                            if stale, let ago = PanelText.ago(last: snap.quotaUpdatedAt, now: now) {
+                                Text("\(ago)更新").font(.system(size: 11)).foregroundColor(th.ink2)
+                            }
+                        }
+                        .padding(.bottom, -2)
                     }
                     if let w = snap.weekly { QuotaRow(title: "每周", window: w, now: now, large: single) }
                     if let f = snap.fiveHour { QuotaRow(title: "5 小时", window: f, now: now, large: single) }
@@ -368,7 +379,7 @@ struct ServiceSection: View {
                             .frame(maxWidth: .infinity, alignment: snap.hasQuota ? .leading : .center)
                             .padding(.vertical, snap.status == .notLoggedIn ? 24 : 0)
                     }
-                    if service == .gemini && [.loginExpired, .notLoggedIn, .fetchFailed, .keychainDenied].contains(snap.status) {
+                    if service == .gemini && [.loginExpired, .notLoggedIn, .fetchFailed, .keychainUnavailable, .keychainDenied].contains(snap.status) {
                         HStack(spacing: 8) {
                             if snap.status == .loginExpired || snap.status == .notLoggedIn {
                                 Button(action: openAntigravity) {
@@ -458,7 +469,7 @@ struct TokenChartSection: View {
                 RangeSegment(range: $model.range, compact: failedCount > 0)
             }
             if let st = status {
-                if st.text == "正在统计…" {
+                if st.text == "正在统计…" && model.panelVisible && !model.showsSettings {
                     LoadingBars(text: st.text)
                 } else if service == .codex {
                     FailedState(text: st.text, onRetry: { model.onRefresh() })
@@ -486,7 +497,10 @@ struct TokenChartSection: View {
             if !model.officialLoaded { return ("正在统计…", false) }
             return model.official == nil ? ("官方用量暂时拿不到", false) : nil
         }
-        guard let h = model.geminiHistory else { return ("正在统计…", false) }
+        guard let h = model.geminiHistory else {
+            let loading = model.historyScanning || model.debugHistoryLoading
+            return (loading ? "正在统计…" : "点菜单栏固定面板，或点刷新查看本机用量", false)
+        }
         let d = h.display
         guard let msg = GeminiHistory.message(d) else { return nil }
         return (msg, d == .allFailed)

@@ -96,17 +96,20 @@ public final class GeminiHistoryScanner {
                          walMtime: micros(w?[.modificationDate] as? Date))
     }
 
+    private func hydrateDiskCacheIfNeeded() {
+        guard !diskLoaded else { return }
+        diskLoaded = true
+        if let u = cacheURL, let f = GeminiUsageCacheFile.load(u) {
+            for (p, e) in f.entries {
+                cache[p] = (Signature(dbSize: e.dbSize, dbMtime: e.dbMtime, walSize: e.walSize, walMtime: e.walMtime), e.days, e.modelDays)
+            }
+        }
+    }
+
     /// 读磁盘缓存进内存（只读一次）；返回缓存里的结果供立即画图，没有缓存返回 nil。
     @discardableResult
     public func loadDiskCache() -> GeminiHistory? {
-        if !diskLoaded {
-            diskLoaded = true
-            if let u = cacheURL, let f = GeminiUsageCacheFile.load(u) {
-                for (p, e) in f.entries {
-                    cache[p] = (Signature(dbSize: e.dbSize, dbMtime: e.dbMtime, walSize: e.walSize, walMtime: e.walMtime), e.days, e.modelDays)
-                }
-            }
-        }
+        hydrateDiskCacheIfNeeded()
         guard !cache.isEmpty else { return nil }
         var daily: [String: Int64] = [:]
         var modelDaily: DailyModelWeights = [:]
@@ -153,7 +156,9 @@ public final class GeminiHistoryScanner {
     public func scan() -> GeminiHistory {
         let t0 = CFAbsoluteTimeGetCurrent()
         var tm = Timings()
-        loadDiskCache()
+        // The real scan aggregates below. Hydrate once without first building and
+        // throwing away an entire stale chart on every foreground refresh.
+        hydrateDiskCacheIfNeeded()
         let before = diskFile()
         let (found, entries) = list()
         var next: [String: CachedUsage] = [:]

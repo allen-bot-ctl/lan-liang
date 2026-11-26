@@ -158,20 +158,73 @@ final class GeminiKeylessAccessTests: XCTestCase {
     func testExpiredCacheAllowsOnlySilentFallbackUntilUserActs() async throws {
         try GeminiTokenCache.write(credential("past", expiresIn: -1), home: home)
         var interactive = 0
-        let p = provider(noninteractive: { .denied }) {
+        let p = provider(noninteractive: { .unavailable }) {
             interactive += 1
             return .found(self.credential("current-after-permission").fileData())
         }
         do {
             _ = try await p.withKeylessAccess { $0.accessToken }
-            XCTFail("Expected explicit keychain authorization state")
-        } catch { XCTAssertEqual(error as? GeminiTokenProvider.TokenError, .keychainDenied) }
+            XCTFail("Expected temporary background unavailability")
+        } catch { XCTAssertEqual(error as? GeminiTokenProvider.TokenError, .keychainUnavailable) }
         XCTAssertEqual(interactive, 0)
         XCTAssertEqual(p.keychainReads, 1)
         p.allowKeychainAgain()
         let recovered = try await p.withKeylessAccess { $0.accessToken }
         XCTAssertEqual(recovered, "current-after-permission")
         XCTAssertEqual(interactive, 1)
+    }
+
+    func testCacheExpiryThenSilentUnavailableThenFileRotationRecoversWithoutPrompt() async throws {
+        let start = now
+        var clock = start
+        var backgroundReads = 0
+        let cache = credential("initial-cache", expiresIn: 120)
+        try GeminiTokenCache.write(cache, home: home)
+        let p = GeminiTokenProvider(home: home, keychain: {
+            XCTFail("Automatic refresh must never prompt")
+            return .denied
+        }, noninteractiveKeychain: {
+            backgroundReads += 1
+            return .unavailable
+        }, clientID: "", clientSecret: "", transport: { _ in
+            XCTFail("No OAuth refresh")
+            throw CocoaError(.fileNoSuchFile)
+        }, now: { clock })
+        let initial = try await p.withKeylessAccess { $0.accessToken }
+        XCTAssertEqual(initial, "initial-cache")
+        XCTAssertEqual(backgroundReads, 0)
+        clock = start.addingTimeInterval(121)
+
+        for attempt in 1...2 {
+            do {
+                _ = try await p.withKeylessAccess { $0.accessToken }
+                XCTFail("Expected unavailable background access")
+            } catch { XCTAssertEqual(error as? GeminiTokenProvider.TokenError, .keychainUnavailable) }
+            XCTAssertEqual(backgroundReads, attempt)
+        }
+
+        try write(credential("new-file"), index: 0)
+        let recovered = try await p.withKeylessAccess { $0.accessToken }
+        XCTAssertEqual(recovered, "new-file")
+        XCTAssertEqual(GeminiTokenCache.readPrivateAccess(home: home)?.accessToken, "new-file")
+        XCTAssertEqual(backgroundReads, 2)
+    }
+
+    func testSilentKeychainRecoversAfterUnlockWithoutManualAuthorization() async throws {
+        var usable = false
+        let fresh = credential("after-unlock").fileData()
+        let p = provider(noninteractive: { usable ? .found(fresh) : .unavailable }) {
+            XCTFail("Unlock recovery must not open authorization UI")
+            return .denied
+        }
+        do {
+            _ = try await p.withKeylessAccess { $0.accessToken }
+            XCTFail("Expected unavailable while locked")
+        } catch { XCTAssertEqual(error as? GeminiTokenProvider.TokenError, .keychainUnavailable) }
+        usable = true
+        let recovered = try await p.withKeylessAccess { $0.accessToken }
+        XCTAssertEqual(recovered, "after-unlock")
+        XCTAssertEqual(p.keychainReads, 2)
     }
 
     func testNetworkFailureLeavesCacheAndNeverOpensKeychain() async throws {
