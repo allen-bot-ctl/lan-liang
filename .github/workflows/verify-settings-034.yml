@@ -1,0 +1,124 @@
+name: Verify settings panel v0.3.4 (no publish)
+
+on:
+  push:
+    branches: ['verify/settings-panel-0.3.4']
+    paths: ['.github/workflows/verify-settings-034.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test, build and smoke (no publish)
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    env:
+      TAG: v0.0.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: 94b9f34f6464a35509205a2efdc74fe8cea9e578
+          persist-credentials: false
+
+      - name: Verify candidate
+        run: test "$(git rev-parse HEAD)" = "94b9f34f6464a35509205a2efdc74fe8cea9e578"
+      - name: Load project.env
+        shell: bash
+        run: |
+          set -euo pipefail
+          source ./project.env
+          {
+            echo "NAME=$NAME"
+            echo "DISPLAY_NAME=$DISPLAY_NAME"
+            echo "VERSION=${TAG#v}"
+          } >> "$GITHUB_ENV"
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          swift --version
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          TZ=UTC swift test 2>&1 | tee /tmp/tests.log
+          status=${PIPESTATUS[0]}
+          grep -E '^(MENUBAR_WIDTH|GEMINI_SCAN_TIMING)' /tmp/tests.log | sed 's/^/RELEASE: /' || true
+          echo "RELEASE: $(grep -E 'Executed [0-9]+ tests' /tmp/tests.log | tail -n 1)"
+          exit "$status"
+
+      - name: No Codex session-log reading (contract 0.1.5 §5)
+        shell: bash
+        run: |
+          if grep -rnE '"(archived_)?sessions"|\.jsonl|CodexSessionLog' App Sources; then
+            echo "::error::代码里不应再读取 ~/.codex/sessions"; exit 1
+          fi
+          echo "RELEASE: no ~/.codex/sessions reads"
+
+      - name: Build universal app, dmg, zip
+        run: scripts/build.sh "$VERSION"
+
+      - name: Dry-run appcast (no key) and check
+        run: |
+          DRY_RUN=1 scripts/appcast.sh "$VERSION"
+          scripts/check_appcast.sh dist/appcast.xml
+          # 同时用当前最新的正式发版说明生成一次 HTML，确保转换器能处理
+          latest=$(ls release-notes/v*.md 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -n "$latest" ]; then v=$(basename "$latest" .md); python3 scripts/notes.py html "${v#v}"; fi
+
+      - name: Verify archs, signature, bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="build/${NAME}.app"
+          bin="$app/Contents/MacOS/$NAME"
+          archs=$(lipo -archs "$bin"); echo "RELEASE: lipo=$archs"
+          [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]
+          fw="$app/Contents/Frameworks/Sparkle.framework/Sparkle"
+          echo "RELEASE: sparkle archs=$(lipo -archs "$fw")"
+          codesign -dv --verbose=2 "$app" 2>&1 | tee /tmp/codesign.log
+          grep -q "Signature=adhoc" /tmp/codesign.log
+          if grep -q "runtime" /tmp/codesign.log; then echo "::error::不应开启 hardened runtime"; exit 1; fi
+          otool -L "$bin" | grep -q "@rpath/Sparkle.framework"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist" | grep -qx "$VERSION"
+          /usr/libexec/PlistBuddy -c "Print :SUFeedURL" "$app/Contents/Info.plist"
+          test -s "$app/Contents/Resources/AppIcon.icns"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$app/Contents/Info.plist" | grep -qx "AppIcon"
+          echo "RELEASE: icon=AppIcon.icns $(stat -f%z "$app/Contents/Resources/AppIcon.icns")B"
+          echo "RELEASE: codesign=adhoc version=$VERSION"
+
+      - name: Smoke test (arm64 native + x86_64 Rosetta)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="build/${NAME}.app/Contents/MacOS/$NAME"
+          if [ "$(uname -m)" = "arm64" ] && ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+            softwareupdate --install-rosetta --agree-to-license || true
+          fi
+          archs="x86_64"; [ "$(uname -m)" = "arm64" ] && archs="arm64 x86_64"
+          for a in $archs; do
+            arch -"$a" "$bin" >"/tmp/smoke-$a.log" 2>&1 &
+            pid=$!
+            sleep 8
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "::error::$a 进程 8 秒内退出"; cat "/tmp/smoke-$a.log"; exit 1
+            fi
+            kill -TERM "$pid" || true; sleep 1; kill -KILL "$pid" 2>/dev/null || true
+            echo "RELEASE: smoke=$a alive 8s"
+          done
+
+      - name: In-panel settings and navigation (light/dark)
+        run: scripts/ci_settings_panel.sh
+
+      - name: Upload screenshots
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: settings-panel-smoke
+          if-no-files-found: warn
+          path: shots/settings-panel/
+
