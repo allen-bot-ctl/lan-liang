@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Combine
+import Darwin
 import ServiceManagement
 #if canImport(Sparkle)
 import Sparkle
@@ -79,6 +80,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var historyTabObservation: AnyCancellable?
     private var historyDebugStarts = 0
     private var appearanceObservation: NSKeyValueObservation?
+    private var appearanceUpdateQueued = false
+    private struct StatusDisplayKey: Equatable {
+        let rows: [MenuBarGroup]
+        let height: CGFloat
+        let palette: MenuBarLayout.Palette?
+    }
+    private var statusDisplayKey: StatusDisplayKey?
+    private var installedMenuBarWidth = NSStatusItem.variableLength
+    private var menuBarInstalls = 0
+    private var menuBarRasters = 0
+    private var menuBarWidthWrites = 0
     private lazy var source: DataSource = makeDataSource()
     private let args = CommandLine.arguments
     private var isDebug: Bool { args.contains { $0.hasPrefix("--debug-") } || ProcessInfo.processInfo.environment["LANLIANG_FAKE"] != nil }
@@ -149,7 +161,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if hoverEnabled, let button = statusItem.button { itemHoverTracking.attach(to: button) }
         // 菜单栏深浅色变化（系统外观、壁纸着色）时重画，文字颜色跟着变（0.3.2）。
         appearanceObservation = statusItem.button?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.updateMenuBar() }
+            if Thread.isMainThread { self?.queueMenuBarAppearanceUpdate() }
+            else { DispatchQueue.main.async { self?.queueMenuBarAppearanceUpdate() } }
         }
 
         loginItem.target = self
@@ -167,7 +180,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
 
-        if args.contains("--debug-history-lifecycle") {
+        if args.contains("--debug-menubar-render") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.debugMenuBarRendering() }
+        } else if args.contains("--debug-history-lifecycle") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.debugHistoryLifecycle() }
         } else if args.contains("--debug-hover-lifecycle") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugHoverLifecycle() }
@@ -236,19 +251,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 只显示开着的服务（契约 0.3.0 §1）。
     private var rows: [MenuBarGroup] { MenuBarText.rows(codex: model.codex, gemini: model.gemini, selection: model.services) }
 
+    /// Coalesce replica KVO callbacks to one semantic appearance check per run-loop turn.
+    private func queueMenuBarAppearanceUpdate() {
+        guard !appearanceUpdateQueued else { return }
+        appearanceUpdateQueued = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.appearanceUpdateQueued = false
+            self.updateMenuBar()
+        }
+    }
+
     /// 两行保留紧凑版；只剩一行时按正常字号、原尺寸展示。
     private func updateMenuBar() {
         guard let b = statusItem.button else { return }
         let rs = rows
-        b.imageScaling = rs.count == 1 ? .scaleNone : defaultMenuBarImageScaling
-        if let img = MenuBarLayout.image(rs, height: NSStatusBar.system.thickness,
-                                         appearance: b.effectiveAppearance) {
-            b.image = img
-            statusItem.length = ceil(img.size.width) + itemPadding
+        let height = NSStatusBar.system.thickness
+        let palette = rs.isEmpty ? nil : MenuBarLayout.Palette.resolve(b.effectiveAppearance)
+        let key = StatusDisplayKey(rows: rs, height: height, palette: palette)
+        guard key != statusDisplayKey else { return }
+
+        let img: NSImage?
+        let width: CGFloat
+        if let palette, let raster = MenuBarLayout.image(rs, height: height, palette: palette) {
+            img = raster
+            width = ceil(raster.size.width) + itemPadding
+            menuBarRasters += 1
         } else {
-            b.image = symbol("chart.bar.fill", label: "栏量")
-            statusItem.length = NSStatusItem.variableLength
+            img = symbol("chart.bar.fill", label: "栏量")
+            width = NSStatusItem.variableLength
+            // A transient allocation failure may recover on a later real refresh.
+            guard rs.isEmpty else { return }
         }
+        // Set before AppKit writes: each write can synchronously invalidate replicas
+        // and call appearance KVO again even when the visible output is unchanged.
+        statusDisplayKey = key
+        let scaling: NSImageScaling = rs.count == 1 ? .scaleNone : defaultMenuBarImageScaling
+        if b.imageScaling != scaling { b.imageScaling = scaling }
+        if installedMenuBarWidth != width {
+            installedMenuBarWidth = width
+            menuBarWidthWrites += 1
+            statusItem.length = width
+        }
+        menuBarInstalls += 1
+        b.image = img
     }
 
     @objc private func clicked(_ sender: NSButton) {
@@ -450,6 +496,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let ok = preview && grace && crossed && pinned && held && menuSafe && dismissed
             print("DEBUG_HOVER_LIFECYCLE \(ok ? "ok" : "failed") preview=\(preview) grace=\(grace) crossed=\(crossed) pinned=\(pinned) held=\(held) menu=\(menuSafe) dismissed=\(dismissed)")
             fflush(stdout)
+        }
+    }
+
+    /// Native fixture against the real NSStatusItem and fake stable quota. Measures
+    /// process user+system CPU, independent of how often host AppKit asks to draw.
+    private func debugMenuBarRendering() {
+        guard let button = statusItem.button, let before = statusDisplayKey,
+              let palette = before.palette, let original = button.image else {
+            print("DEBUG_MENUBAR_RENDER failed: no rendered fixture")
+            fflush(stdout)
+            return
+        }
+        func clock() -> (wall: Double, cpu: Double) {
+            var t = timespec()
+            let result = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t)
+            let cpu = result == 0 ? Double(t.tv_sec) + Double(t.tv_nsec) / 1e9 : -1
+            return (ProcessInfo.processInfo.systemUptime, cpu)
+        }
+        func concrete(_ image: NSImage?, pixels: CGSize) -> Bool {
+            let reps = image?.representations ?? []
+            return reps.count == 2 && reps.allSatisfy { $0 is NSBitmapImageRep } &&
+                reps.map(\.pixelsWide).sorted() == [Int(ceil(pixels.width)), Int(ceil(pixels.width * 2))] &&
+                reps.map(\.pixelsHigh).sorted() == [Int(ceil(pixels.height)), Int(ceil(pixels.height * 2))]
+        }
+        func repeatRefresh(_ remaining: Int, completion: @escaping () -> Void) {
+            guard remaining > 0 else { completion(); return }
+            refresh()
+            // Exercise both identical quota callbacks and duplicate appearance signals.
+            for _ in 0..<4 { queueMenuBarAppearanceUpdate() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { repeatRefresh(remaining - 1, completion: completion) }
+        }
+        let counts = (menuBarRasters, menuBarInstalls, menuBarWidthWrites)
+        let initialConcrete = concrete(original, pixels: original.size)
+        let t0 = clock()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+            let t1 = clock()
+            let idleStable = counts == (self.menuBarRasters, self.menuBarInstalls, self.menuBarWidthWrites) && button.image === original
+            repeatRefresh(80) {
+                let t2 = clock()
+                let burstStable = counts == (self.menuBarRasters, self.menuBarInstalls, self.menuBarWidthWrites) && button.image === original
+                // Change the actual view appearance. Its KVO and explicit duplicate
+                // signals must collapse to one new image and no layout write.
+                button.appearance = NSAppearance(named: palette.dark ? .aqua : .darkAqua)
+                for _ in 0..<20 { self.queueMenuBarAppearanceUpdate() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                    let appearanceChanged = self.statusDisplayKey?.palette?.dark == !palette.dark
+                    let rasterDelta = self.menuBarRasters - counts.0
+                    let installDelta = self.menuBarInstalls - counts.1
+                    let widthDelta = self.menuBarWidthWrites - counts.2
+                    let idle = (t1.cpu - t0.cpu) / (t1.wall - t0.wall) * 100
+                    let burst = (t2.cpu - t1.cpu) / (t2.wall - t1.wall) * 100
+                    let ok = initialConcrete && idleStable && burstStable && appearanceChanged &&
+                        rasterDelta == 1 && installDelta == 1 && widthDelta == 0 &&
+                        button.image !== original && concrete(button.image, pixels: original.size) &&
+                        t0.cpu >= 0 && t1.cpu >= 0 && t2.cpu >= 0 && idle < 35 && burst < 55
+                    let idleText = String(format: "%.2f", idle)
+                    let burstText = String(format: "%.2f", burst)
+                    let idleCoreSeconds = String(format: "%.4f", t1.cpu - t0.cpu)
+                    let burstCoreSeconds = String(format: "%.4f", t2.cpu - t1.cpu)
+                    let idleWallSeconds = String(format: "%.3f", t1.wall - t0.wall)
+                    let burstWallSeconds = String(format: "%.3f", t2.wall - t1.wall)
+                    print("DEBUG_MENUBAR_RENDER \(ok ? "ok" : "failed") rows=\(before.rows.count) bitmap=\(initialConcrete) idleStable=\(idleStable) burstStable=\(burstStable) appearance=\(appearanceChanged) rasters=\(rasterDelta) installs=\(installDelta) widths=\(widthDelta) idleCPU=\(idleText)% burstCPU=\(burstText)% idleCoreSeconds=\(idleCoreSeconds) idleWallSeconds=\(idleWallSeconds) burstCoreSeconds=\(burstCoreSeconds) burstWallSeconds=\(burstWallSeconds)")
+                    fflush(stdout)
+                }
+            }
         }
     }
 

@@ -110,73 +110,111 @@ public enum MenuBarLayout {
 
     public static func iconName(_ s: Service) -> String { s == .codex ? "terminal" : "sparkle" }
 
-    /// 画出内容图；height 用菜单栏高度（NSStatusBar.system.thickness）。
-    /// appearance：菜单栏按钮的 effectiveAppearance（nil = 当前外观）；颜色在画的时候按它解析。
+    /// Resolved sRGB palette rather than NSAppearance identity. Status-bar replica
+    /// windows can deliver different appearance objects for the same displayed colors.
+    struct Palette: Equatable {
+        var dark: Bool
+        var red: CGFloat
+        var green: CGFloat
+        var blue: CGFloat
+        var alpha: CGFloat
+
+        var label: NSColor {
+            NSColor(srgbRed: red, green: green, blue: blue, alpha: alpha)
+        }
+
+        static func resolve(_ appearance: NSAppearance?) -> Self {
+            let ap = appearance ?? NSAppearance.currentDrawing()
+            var palette = Self(dark: false, red: 0, green: 0, blue: 0, alpha: 1)
+            ap.performAsCurrentDrawingAppearance {
+                let dark = ap.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                let label = NSColor.labelColor.usingColorSpace(.sRGB) ?? (dark ? .white : .black)
+                palette = Self(dark: dark, red: label.redComponent, green: label.greenComponent,
+                               blue: label.blueComponent, alpha: label.alphaComponent)
+            }
+            return palette
+        }
+    }
+
+    /// Draw both backing scales up front. AppKit status-item replicas only see
+    /// concrete bitmap reps, so redraws cannot rerun symbols/CoreText via NSCustomImageRep.
     public static func image(_ rows: [MenuBarGroup], height: CGFloat, large: Bool = false,
                              appearance: NSAppearance? = nil) -> NSImage? {
+        image(rows, height: height, large: large, palette: Palette.resolve(appearance))
+    }
+
+    static func image(_ rows: [MenuBarGroup], height: CGFloat, large: Bool = false, palette: Palette) -> NSImage? {
         let rows = Array(rows.prefix(2))
-        guard !rows.isEmpty else { return nil }
+        guard !rows.isEmpty, height.isFinite, height > 0 else { return nil }
         let st = style(rowCount: rows.count, large: large)
         let pos = positions(rows, large: large)
         let c = columns(rows, large: large)
         let singleRow = rows.count == 1
         let contentWidth = width(rows, large: large)
         let w = singleRow ? ceil(contentWidth) : contentWidth
-        let img = NSImage(size: NSSize(width: w, height: height), flipped: false) { _ in
-            let ap = appearance ?? NSAppearance.currentDrawing()
-            ap.performAsCurrentDrawingAppearance {
-                let dark = ap.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                // 动态色在当前外观下解析成固定颜色。
-                let label = NSColor.labelColor.usingColorSpace(.sRGB) ?? (dark ? .white : .black)
-                let orange = secondaryColor(dark: dark)
-                let pitch: CGFloat = rows.count == 2 ? 10.5 : 0
-                func aligned(_ point: CGPoint) -> CGPoint {
-                    guard singleRow, let ctx = NSGraphicsContext.current?.cgContext else { return point }
-                    let d = ctx.convertToDeviceSpace(point)
-                    return ctx.convertToUserSpace(CGPoint(x: d.x.rounded(), y: d.y.rounded()))
-                }
-                for (i, row) in rows.enumerated() {
-                    // 行中心：两行时上下各偏 pitch/2，整体在菜单栏高度内居中。
-                    let cy = height / 2 + (rows.count == 2 ? (i == 0 ? pitch / 2 : -pitch / 2) : 0)
-                    let config = NSImage.SymbolConfiguration(pointSize: st.iconPoint, weight: .semibold)
-                        .applying(NSImage.SymbolConfiguration(paletteColors: [label]))
-                    if let sym = NSImage(systemSymbolName: iconName(row.service), accessibilityDescription: row.service.title)?
-                        .withSymbolConfiguration(config) {
-                        let s = sym.size
-                        let fit = singleRow && s.width > 0 ? min(1, c.icon / s.width) : 1
-                        let size = CGSize(width: s.width * fit, height: s.height * fit)
-                        let origin = aligned(CGPoint(x: (c.icon - size.width) / 2, y: cy - size.height / 2))
-                        sym.draw(in: CGRect(origin: origin, size: size), from: .zero, operation: .sourceOver, fraction: 1)
-                    }
-                    // 同一行的周剩余和 5 小时数字共用一条基线（按周剩余字体让数字视觉居中，契约 0.1.3 §3）。
-                    let base = MenuBarLayout.baseline(rowIndex: i, rowCount: rows.count, height: height, large: large)
-                    func draw(_ text: String, font: NSFont, x: CGFloat, color: NSColor) {
-                        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-                        let a = NSAttributedString(string: text, attributes: [
-                            .font: font, NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true])
-                        let line = CTLineCreateWithAttributedString(a)
-                        ctx.saveGState()
-                        ctx.setFillColor(color.cgColor)
-                        ctx.textMatrix = .identity
-                        ctx.textPosition = aligned(CGPoint(x: x, y: base))
-                        CTLineDraw(line, ctx)
-                        ctx.restoreGState()
-                    }
-                    // 周剩余左对齐，紧跟图标（0.3.2：图标和数字之间不再空一位）。
-                    draw(row.primary, font: st.primaryFont, x: pos.primary, color: label)
-                    // 0.5pt 竖线，和数字垂直居中。
-                    let lh = st.dividerHeight
-                    let dy = base + st.primaryFont.capHeight / 2 - lh / 2
-                    label.withAlphaComponent(dividerAlpha).setFill()
-                    NSRect(x: pos.divider - dividerWidth / 2, y: dy, width: dividerWidth, height: lh).fill()
-                    let sec = secondaryText(row)
-                    draw(sec.text, font: secondaryFont(row, st), x: pos.secondary,
-                         color: sec.isPlaceholder ? label.withAlphaComponent(placeholderAlpha) : orange)
-                }
+        let size = NSSize(width: w, height: height)
+        let img = NSImage(size: size)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        for scale in [CGFloat(1), CGFloat(2)] {
+            guard let ctx = CGContext(data: nil, width: Int(ceil(w * scale)), height: Int(ceil(height * scale)),
+                                      bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+            ctx.scaleBy(x: scale, y: scale)
+            ctx.clear(CGRect(origin: .zero, size: size))
+            let label = palette.label
+            let orange = secondaryColor(dark: palette.dark)
+            let pitch: CGFloat = rows.count == 2 ? 10.5 : 0
+            func aligned(_ point: CGPoint) -> CGPoint {
+                guard singleRow, let ctx = NSGraphicsContext.current?.cgContext else { return point }
+                let d = ctx.convertToDeviceSpace(point)
+                return ctx.convertToUserSpace(CGPoint(x: d.x.rounded(), y: d.y.rounded()))
             }
-            return true
+            for (i, row) in rows.enumerated() {
+                // 行中心：两行时上下各偏 pitch/2，整体在菜单栏高度内居中。
+                let cy = height / 2 + (rows.count == 2 ? (i == 0 ? pitch / 2 : -pitch / 2) : 0)
+                let config = NSImage.SymbolConfiguration(pointSize: st.iconPoint, weight: .semibold)
+                    .applying(NSImage.SymbolConfiguration(paletteColors: [label]))
+                if let sym = NSImage(systemSymbolName: iconName(row.service), accessibilityDescription: row.service.title)?
+                    .withSymbolConfiguration(config) {
+                    let s = sym.size
+                    let fit = singleRow && s.width > 0 ? min(1, c.icon / s.width) : 1
+                    let size = CGSize(width: s.width * fit, height: s.height * fit)
+                    let origin = aligned(CGPoint(x: (c.icon - size.width) / 2, y: cy - size.height / 2))
+                    sym.draw(in: CGRect(origin: origin, size: size), from: .zero, operation: .sourceOver, fraction: 1)
+                }
+                // 同一行的周剩余和 5 小时数字共用一条基线（按周剩余字体让数字视觉居中，契约 0.1.3 §3）。
+                let base = MenuBarLayout.baseline(rowIndex: i, rowCount: rows.count, height: height, large: large)
+                func draw(_ text: String, font: NSFont, x: CGFloat, color: NSColor) {
+                    guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+                    let a = NSAttributedString(string: text, attributes: [
+                        .font: font, NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true])
+                    let line = CTLineCreateWithAttributedString(a)
+                    ctx.saveGState()
+                    ctx.setFillColor(color.cgColor)
+                    ctx.textMatrix = .identity
+                    ctx.textPosition = aligned(CGPoint(x: x, y: base))
+                    CTLineDraw(line, ctx)
+                    ctx.restoreGState()
+                }
+                // 周剩余左对齐，紧跟图标（0.3.2：图标和数字之间不再空一位）。
+                draw(row.primary, font: st.primaryFont, x: pos.primary, color: label)
+                // 0.5pt 竖线，和数字垂直居中。
+                let lh = st.dividerHeight
+                let dy = base + st.primaryFont.capHeight / 2 - lh / 2
+                label.withAlphaComponent(dividerAlpha).setFill()
+                NSRect(x: pos.divider - dividerWidth / 2, y: dy, width: dividerWidth, height: lh).fill()
+                let sec = secondaryText(row)
+                draw(sec.text, font: secondaryFont(row, st), x: pos.secondary,
+                     color: sec.isPlaceholder ? label.withAlphaComponent(placeholderAlpha) : orange)
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            guard let raster = ctx.makeImage() else { return nil }
+            let rep = NSBitmapImageRep(cgImage: raster)
+            rep.size = size
+            img.addRepresentation(rep)
         }
-        if singleRow { img.cacheMode = .never }
         img.isTemplate = false
         img.accessibilityDescription = rows.map { "\($0.service.title) \($0.primary) 5小时 \($0.secondary ?? "无")" }
             .joined(separator: "，")
