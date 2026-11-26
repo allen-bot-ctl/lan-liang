@@ -1,0 +1,33 @@
+name: Verify v0.3.8 Gemini recovery
+on:
+  push:
+    branches: ['verify/v0.3.8-gemini-recovery']
+    paths: ['.github/workflows/verify-v0.3.8-gemini-recovery.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 0cee5c81062f25cb2d7a6cff38180ff738d1c8a2
+          persist-credentials: false
+      - name: Exact source and unit tests
+        run: |
+          test "$(git rev-parse HEAD)" = "0cee5c81062f25cb2d7a6cff38180ff738d1c8a2"
+          TZ=UTC swift test
+          if grep -rnE '"(archived_)?sessions"|\.jsonl|CodexSessionLog' App Sources; then exit 1; fi
+      - name: Build keyless native package
+        run: |
+          env -u ANTIGRAVITY_CLIENT_ID -u ANTIGRAVITY_CLIENT_SECRET scripts/build.sh 0.3.8
+          if /usr/libexec/PlistBuddy -c 'Print :LLAntigravityClientSecret' build/LanLiang.app/Contents/Info.plist >/dev/null 2>&1; then exit 1; fi
+      - name: Gemini recovery screenshot fixtures
+        run: TZ=UTC bash scripts/ci_v038.sh
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v038-gemini-recovery
+          path: shots/gemini-recovery/
