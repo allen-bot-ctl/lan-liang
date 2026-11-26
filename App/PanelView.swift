@@ -37,8 +37,6 @@ final class PanelModel: ObservableObject {
 
 struct PanelView: View {
     @ObservedObject var model: PanelModel
-    /// true：撑满窗口、内容贴顶（窗口高度慢一拍时也不会把顶部吞掉或在顶上留白）；false：只量自然高度。
-    var fill = true
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -52,17 +50,12 @@ struct PanelView: View {
             } else {
                 ServiceTabs(model: model).padding(.horizontal, 12)
             }
-            if fill {
-                // 顶栏和页签固定，下面的内容可以纵向滚动（以后加区块时超过屏幕高度就出滚动条）；
-                // 每次切页签按页签重建，滚动位置回到顶部。
-                ScrollView(.vertical, showsIndicators: true) { sections }
-                    .id(model.shownTab)
-            } else {
-                sections
-            }
+            // 顶栏和页签固定；超出的内容可滚动。切页签时自动回到顶部。
+            ScrollView(.vertical, showsIndicators: true) { sections }
+                .id(model.shownTab)
         }
         .frame(width: 400)
-        .frame(maxHeight: fill ? .infinity : nil, alignment: .top)
+        .frame(maxHeight: .infinity, alignment: .top)
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(th.panelStroke, lineWidth: 0.5))
     }
 

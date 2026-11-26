@@ -1,7 +1,6 @@
 import AppKit
 import SwiftUI
 import ServiceManagement
-import Combine
 #if canImport(Sparkle)
 import Sparkle
 #endif
@@ -63,15 +62,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItemCount = 0
     private var panel: FloatingPanel?
     private var host: NSHostingView<PanelView>?
-    /// 只用来量面板自然高度（不进窗口）。
-    private var measurer: NSHostingController<PanelView>?
     private var settingsWindow: NSWindow?
     private let settingsModel = SettingsModel()
     private var outsideMonitor: Any?
     private let contextMenu = NSMenu()
     private let loginItem = NSMenuItem(title: "登录时启动", action: #selector(toggleLogin), keyEquivalent: "")
     private var timer: Timer?
-    private var subs: Set<AnyCancellable> = []
     private var appearanceObservation: NSKeyValueObservation?
     private lazy var source: DataSource = makeDataSource()
     private let args = CommandLine.arguments
@@ -115,11 +111,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateWatcher.onResult = { [weak self] v in self?.setAvailableUpdate(v) }
         _ = updater
         #endif
-        // 切页签、切区间、历史结果到达后，面板高度跟着内容走。
-        model.$tab.map { _ in () }.merge(with: model.$range.map { _ in () }, model.$geminiHistory.map { _ in () },
-                                          model.$officialLoaded.map { _ in () }, model.$services.map { _ in () })
-            .sink { [weak self] _ in DispatchQueue.main.async { self?.fitPanel() } }
-            .store(in: &subs)
         model.onReauthorizeKeychain = { [weak self] in self?.source.allowKeychainAgain(); self?.refresh() }
 
         statusItem = makeItem()
@@ -150,8 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if args.contains("--debug-open-panel") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 self.showPanel(from: self.statusItem.button)
-                if let n = argValue("debug-tab-flip").flatMap({ Int($0) }) {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.debugFlip(n, total: n, tops: [], bad: 0) }
+                if let n = argValue("debug-tab-flip").flatMap({ Int($0) }), let initialFrame = self.panel?.frame {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.debugFlip(n, total: n, initialFrame: initialFrame, tops: [], bad: 0) }
                 } else {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.printRects() }
                 }
@@ -244,11 +235,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func ensurePanel() {
         guard panel == nil else { return }
         let h = NSHostingView(rootView: PanelView(model: model))
-        // 不让 NSHostingView 按内容自己改尺寸（它在视效视图里会从左下角伸缩，顶部被吞或顶上留白）；
-        // 尺寸只由 fitPanel 同步算出、一次设到窗口上（0.2.1 修复）。
+        // 面板尺寸只由 showPanel 设置，内容变化由 SwiftUI 的滚动区吸收。
         h.sizingOptions = []
-        measurer = NSHostingController(rootView: PanelView(model: model, fill: false))
-        let p = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+        let frame = NSRect(origin: .zero, size: Self.mainPanelSize)
+        let p = FloatingPanel(contentRect: frame,
                               styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.isFloatingPanel = true
         p.level = .statusBar
@@ -256,7 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         p.backgroundColor = .clear
         p.isOpaque = false
         // 半透明圆角（契约 0.2.0 §2）：内容放在 .popover 材质里，圆角 10。
-        let fx = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let fx = NSVisualEffectView(frame: frame)
         fx.material = .popover
         fx.blendingMode = .behindWindow
         fx.state = .active
@@ -274,12 +264,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let button = button, let win = button.window else { return }
         let r = win.convertToScreen(button.convert(button.bounds, to: nil))
         guard let panel = panel else { return }
-        let size = panelSize()
+        let screen = win.screen ?? NSScreen.main
+        let top = r.minY - 4
+        let size = panelSize(availableHeight: screen.map { top - $0.visibleFrame.minY - 8 })
         var x = r.minX
-        if let screen = win.screen ?? NSScreen.main {
+        if let screen {
             x = min(max(x, screen.visibleFrame.minX + 8), screen.visibleFrame.maxX - size.width - 8)
         }
-        panel.setFrame(NSRect(x: x, y: r.minY - size.height - 4, width: size.width, height: size.height), display: true)
+        panel.setFrame(NSRect(x: x, y: top - size.height, width: size.width, height: size.height), display: true)
         panel.orderFrontRegardless()
         panel.invalidateShadow()
         if outsideMonitor == nil {
@@ -294,36 +286,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let m = outsideMonitor { NSEvent.removeMonitor(m); outsideMonitor = nil }
     }
 
-    /// 内容变化后保持面板顶边不动、高度跟内容走。
-    private func fitPanel() {
-        guard let panel = panel, panel.isVisible else { return }
-        let size = panelSize()
-        var f = panel.frame
-        guard abs(f.height - size.height) > 0.5 || abs(f.width - size.width) > 0.5 else { return }
-        f.origin.y = f.maxY - size.height      // 顶边钉在菜单栏下面不动
-        f.size = size
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0
-            ctx.allowsImplicitAnimation = false
-            panel.setFrame(f, display: true, animate: false)
-        }
-        panel.contentView?.layoutSubtreeIfNeeded()
-        panel.invalidateShadow()
-    }
+    /// 对齐较矮的 Codex 面板；只有屏幕放不下时才缩小滚动视口。
+    private static let mainPanelSize = NSSize(width: 400, height: 414)
 
-    /// 按当前数据同步量出面板尺寸（宽 400）。
-    private func panelSize() -> NSSize {
-        guard let m = measurer else { return NSSize(width: 400, height: 300) }
-        m.rootView = PanelView(model: model, fill: false)
-        let s = m.sizeThatFits(in: NSSize(width: 400, height: 4000))
-        // 高度上限：屏幕可见高度减边距（截图用 --debug-max-height 压低）；超过就在面板里滚动。
-        var cap = ((panel?.screen ?? NSScreen.main)?.visibleFrame.height ?? 800) - 40
-        if let d = argValue("debug-max-height").flatMap({ Double($0) }) { cap = CGFloat(d) }
-        return NSSize(width: 400, height: min(ceil(s.height), cap))
+    private func panelSize(availableHeight: CGFloat?) -> NSSize {
+        var height = Self.mainPanelSize.height
+        if let availableHeight { height = min(height, max(1, floor(availableHeight))) }
+        if let value = argValue("debug-max-height").flatMap({ Double($0) }), value.isFinite, value >= 1 {
+            height = min(height, floor(CGFloat(value)))
+        }
+        return NSSize(width: Self.mainPanelSize.width, height: height)
     }
 
     /// 截图用：来回切页签 n 次，每次检查面板顶边、内容视图和窗口是否一致，最后打印截图区域。
-    private func debugFlip(_ left: Int, total: Int, tops: [CGFloat], bad: Int) {
+    private func debugFlip(_ left: Int, total: Int, initialFrame: NSRect, tops: [CGFloat], bad: Int) {
         // 只开一个服务时没有页签可切（契约 0.3.0 §2）：不切，直接打印截图区域。
         if model.services.isSingle {
             print("DEBUG_TABFLIP skipped services=\(model.services.debugText)")
@@ -338,11 +314,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         model.tab = model.tab == .codex ? .gemini : .codex
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            self.fitPanel()
             guard let p = self.panel, let h = self.host, let cv = p.contentView else { return }
             let ok = abs(h.frame.height - cv.bounds.height) < 0.5 && abs(h.frame.maxY - cv.bounds.maxY) < 0.5
-                && abs(self.panelSize().height - p.frame.height) < 0.5
-            self.debugFlip(left - 1, total: total, tops: tops + [p.frame.maxY], bad: bad + (ok ? 0 : 1))
+                && p.frame == initialFrame
+            self.debugFlip(left - 1, total: total, initialFrame: initialFrame, tops: tops + [p.frame.maxY], bad: bad + (ok ? 0 : 1))
         }
     }
 
@@ -365,7 +340,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard let self = self else { return }
                 self.model.codex = s
                 self.updateMenuBar()
-                DispatchQueue.main.async { self.fitPanel() }
             },
             onCodexOfficial: { [weak self] o in
                 guard self?.args.contains("--debug-loading") == false else { return }
@@ -376,7 +350,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard let self = self else { return }
                 self.model.gemini = s
                 self.updateMenuBar()
-                DispatchQueue.main.async { self.fitPanel() }
             },
             onAllDone: { [weak self] in
                 guard let self = self else { return }
@@ -419,7 +392,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if debugServices == nil { new.save(to: .standard) }
         keepTabEnabled()
         updateMenuBar()
-        DispatchQueue.main.async { self.fitPanel() }
         if on {
             pendingRefresh = true
             refresh()

@@ -152,7 +152,14 @@ v032cells v032-mb-codex-no5h 'codex:77%|--'
 v032cells v032-mb-gemini 'gemini:44%|64'
 v032cells v032-mb-codex-5h 'codex:77%|36'
 v032cells v032-mb-max 'codex:100%|100,gemini:100%|100'
-# 0.2.1：快速来回切页签 20/21 次后（停在 Codex / Gemini），面板顶边不动、内容视图和窗口一致。
+# 快速切换 20/21 次后（停在 Codex / Gemini），窗口四边不动，
+# 两个页签都使用 400×414 pt；较小屏幕用调试上限验证滚动视口。
+assert_panel_size() {
+  local log="$1" height="$2" size
+  size=$(awk '/^DEBUG_RECT_PANEL/{split($2, rect, ","); print rect[3] "," rect[4]}' "$log" | tail -n 1)
+  [[ "$size" == "400,$height" ]] \
+    || { echo "::error::主面板预期 400×${height}pt，实测 $size（$log）"; return 1; }
+}
 for ap in dark light; do
   if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
   for n in 20 21; do
@@ -162,9 +169,11 @@ for ap in dark light; do
     echo "RELEASE: tabflip $n $ap: $l"
     grep -q " topsUnique=1 " <<<"$l" && grep -q " mismatches=0$" <<<"$l" \
       || { echo "::error::切页签后面板顶边或内容错位: $l"; exit 1; }
+    assert_panel_size "/tmp/shots--tabflip-$n-$ap.log" 414
   done
   # 内容超过高度上限时在面板里滚动（压低上限到 300pt）。
   LANLIANG_FAKE="$PWD/fixtures/normal.json" shoot "-scroll-capped-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex,gemini --debug-tab=gemini --debug-max-height=300 --debug-tab-flip=20
+  assert_panel_size "/tmp/shots--scroll-capped-$ap.log" 300
 done
 # 带旧偏好升级（契约 0.1.3 §1）：预置旧版本留下的 Item-0 隐藏偏好（以及新名字也被藏），启动后状态项必须可见。
 for ap in dark light; do
