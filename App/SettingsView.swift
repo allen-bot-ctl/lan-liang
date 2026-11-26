@@ -325,6 +325,7 @@ struct SummaryChart: View {
     let summary: UsageSummary
     @State private var range: TokenRange
     @State private var hover: String?
+    @State private var modelSelection: ModelPeriodSelection
     @Environment(\.colorScheme) private var scheme
 
     init(panel: PanelModel, summary: UsageSummary) {
@@ -332,6 +333,8 @@ struct SummaryChart: View {
         self.summary = summary
         // 截图用 --debug-summary-range；默认每日，和面板的选择无关。
         _range = State(initialValue: argValue("debug-summary-range").flatMap { TokenRange(rawValue: $0) } ?? .daily)
+        _modelSelection = State(initialValue: ModelPeriodSelection(
+            key: ProcessInfo.processInfo.environment["LANLIANG_FAKE"] != nil ? argValue("debug-summary-selection") : nil))
     }
 
     /// 开着且拿到了数据的服务各自的每日用量。
@@ -369,6 +372,7 @@ struct SummaryChart: View {
         let bars = stacked.map { $0.bar }
         let stacks = Self.stackMap(stacked, both: both)
         let active = hover ?? Self.debugHover(panel.hoverKey, bars)
+        let scope = modelSelection.resolve(in: bars, now: now, calendar: calendar)
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 6) {
                 Text("累计").font(.system(size: 12)).foregroundColor(th.ink2).lineLimit(1).fixedSize()
@@ -382,7 +386,12 @@ struct SummaryChart: View {
                         .background(RoundedRectangle(cornerRadius: 5).fill(Theme.accent.opacity(0.14)))
                 }
                 Spacer(minLength: 0)
-                RangeSegment(range: $range)
+                RangeSegment(range: Binding(get: { range }, set: { next in
+                    guard next != range else { return }
+                    hover = nil
+                    modelSelection.clear()
+                    range = next
+                }))
             }
             if c == nil && g == nil {
                 // 两家都没拿到：复用面板的状态视图。
@@ -395,12 +404,13 @@ struct SummaryChart: View {
             } else {
                 BarChart(bars: bars, active: active, axisKeys: Set(TokenChartSection.axisKeysFor(bars, range: range)),
                          axisLabel: { k in TokenChartSection.axisLabelFor(k, range: range) }, hover: $hover,
-                         stacks: stacks, stackedTip: both && c != nil && g != nil)
+                         stacks: stacks, stackedTip: both && c != nil && g != nil,
+                         selection: scope?.selected?.key, onBarClick: { modelSelection.toggle($0) })
                     .frame(height: TokenChartSection.chartHeight)
             }
-            if let first = bars.first {
-                ModelDistributionSection(panel: panel, start: first.key,
-                                         end: DayKey.of(now, calendar: calendar), range: range)
+            if let scope {
+                ModelDistributionSection(panel: panel, start: scope.start, end: scope.end, range: range,
+                                         selectedLabel: scope.selected?.label, onClear: { modelSelection.clear() })
                     .id("settings-model-distribution")
             }
         }
@@ -413,6 +423,8 @@ struct ModelDistributionSection: View {
     let start: String
     let end: String
     let range: TokenRange
+    let selectedLabel: String?
+    let onClear: () -> Void
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -423,7 +435,20 @@ struct ModelDistributionSection: View {
                 Text("模型分布").font(.system(size: 13, weight: .semibold)).foregroundColor(th.ink)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 4)
-                Text(windowTitle).font(.system(size: 10)).foregroundColor(th.ink3)
+                if let selectedLabel {
+                    Text(selectedLabel).font(.system(size: 10, weight: .medium)).foregroundColor(th.ink)
+                    Button(action: onClear) {
+                        Label("清除", systemImage: "xmark")
+                            .font(.system(size: 10, weight: .medium)).foregroundColor(th.ink2)
+                            .padding(.horizontal, 7).padding(.vertical, 4)
+                            .background(Capsule().fill(th.sel))
+                    }
+                    .buttonStyle(.plain)
+                    .help("恢复完整统计范围")
+                    .accessibilityLabel("清除模型分布筛选")
+                } else {
+                    Text(windowTitle).font(.system(size: 10)).foregroundColor(th.ink3)
+                }
             }
             if panel.services.codex {
                 distribution("Codex", "按本机活跃会话 · 最后使用的模型", data: panel.codexModelActivity,

@@ -21,6 +21,50 @@ final class ModelDistributionTests: XCTestCase {
         XCTAssertTrue(ModelDistribution.shares(days, start: "2026-11-26", through: "2026-12-01").isEmpty)
     }
 
+    func testSettingsSelectionUsesExactlyOneDisplayedBucket() {
+        let cal = TokenSeries.calendar(timeZone: TimeZone(identifier: "America/New_York")!)
+        let now = cal.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 12))!
+        let cases: [(TokenRange, String, String)] = [
+            (.daily, "2026-11-02", "2026-11-02"),
+            (.weekly, "2026-10-26", "2026-11-01"),
+            (.monthly, "2026-10-01", "2026-10-31"),
+            (.weekly, "2026-11-23", "2026-11-24"),
+            (.monthly, "2026-11-01", "2026-11-24")
+        ]
+        for (range, key, end) in cases {
+            let bars = TokenSeries.bars(range: range, official: nil, local: [:], now: now, calendar: cal)
+            var choice = ModelPeriodSelection()
+            XCTAssertEqual(choice.resolve(in: bars, now: now, calendar: cal)?.start, bars.first?.key)
+            choice.toggle(key)
+            let selected = choice.resolve(in: bars, now: now, calendar: cal)
+            XCTAssertEqual(selected?.selected?.key, key)
+            XCTAssertEqual(selected?.start, key)
+            XCTAssertEqual(selected?.end, end)
+            choice.toggle(key)
+            XCTAssertNil(choice.key)
+            choice.toggle(key)
+            choice.clear()
+            XCTAssertNil(choice.resolve(in: bars, now: now, calendar: cal)?.selected)
+            choice.toggle("missing")
+            XCTAssertEqual(choice.resolve(in: bars, now: now, calendar: cal)?.end, "2026-11-24")
+        }
+    }
+
+    func testSelectedMonthExcludesOtherModelsAndFutureDates() throws {
+        let cal = TokenSeries.calendar(timeZone: TimeZone(secondsFromGMT: 0)!)
+        let now = cal.date(from: DateComponents(year: 2026, month: 11, day: 24))!
+        let bars = TokenSeries.bars(range: .monthly, official: nil, local: [:], now: now, calendar: cal)
+        let choice = ModelPeriodSelection(key: "2026-11-01")
+        let scope = try XCTUnwrap(choice.resolve(in: bars, now: now, calendar: cal))
+        let weights: DailyModelWeights = [
+            "2026-10-20": ["old": 900], "2026-11-01": ["new": 1],
+            "2026-11-24": ["new": 4], "2026-11-25": ["future": 900]
+        ]
+        let selected = ModelDistribution.shares(weights, start: scope.start, through: scope.end)
+        XCTAssertEqual(selected.map(\.name), ["new"])
+        XCTAssertEqual(selected.map(\.tenths), [1000])
+    }
+
     func testAntigravityGenerationFields() {
         let at = Date(timeIntervalSince1970: 1_795_531_200)
         let id = Data(repeating: 9, count: 16)

@@ -9,12 +9,12 @@ cleanup() {
     if [[ -n "${pid:-}" ]]; then kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
-for config in 'light daily' 'dark weekly' 'dark monthly'; do
-    read -r ap range <<<"$config"
-    name="shots/model-distribution/$ap-$range"
+for config in 'light daily' 'dark weekly' 'dark monthly' 'light monthly 2026-11-01'; do
+    read -r ap range selected <<<"$config"
+    name="shots/model-distribution/$ap-$range${selected:+-$selected}"
     LANLIANG_FAKE="$PWD/fixtures/model-distribution.json" "$bin" --debug-open-settings \
         --debug-appearance="$ap" --debug-summary-range="$range" --debug-services=codex,gemini \
-        --debug-show-models >"$name.log" 2>&1 &
+        --debug-show-models --debug-summary-selection="$selected" >"$name.log" 2>&1 &
     pid=$!
     for _ in $(seq 1 15); do
         grep -q '^DEBUG_RECT_PANEL ' "$name.log" && break

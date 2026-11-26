@@ -67,6 +67,28 @@ public enum ModelDistribution {
     }
 }
 
+/// Ephemeral selection for the settings summary, independent of the main panel.
+public struct ModelPeriodSelection {
+    public private(set) var key: String?
+    public init(key: String? = nil) { self.key = key }
+
+    public mutating func toggle(_ key: String) { self.key = self.key == key ? nil : key }
+    public mutating func clear() { key = nil }
+
+    public func resolve(in bars: [TokenBar], now: Date, calendar: Calendar)
+        -> (start: String, end: String, selected: TokenBar?)? {
+        guard let first = bars.first else { return nil }
+        let today = DayKey.of(now, calendar: calendar)
+        guard let key, let index = bars.firstIndex(where: { $0.key == key }),
+              bars[index].key <= today else { return (first.key, today, nil) }
+        let next = index + 1
+        let end = next < bars.count
+            ? calendar.date(byAdding: .day, value: -1, to: bars[next].start).map { DayKey.of($0, calendar: calendar) }
+            : nil
+        return (key, min(today, end ?? today), bars[index])
+    }
+}
+
 /// Narrow read-only metadata query. No transcript, prompt, auth, or rollout column is selected.
 public enum CodexModelActivity {
     public static func read(db: URL, since: Date, now: Date, calendar: Calendar) -> DailyModelWeights? {

@@ -588,6 +588,9 @@ struct BarChart: View {
     var stacks: [String: StackedBar]? = nil
     /// 悬停时用四行堆叠气泡（日期、Codex、Gemini、合计）；false = 面板原样的两行气泡。
     var stackedTip = false
+    // Only Settings opts in. Other charts have no tap recognizer or selection.
+    var selection: String? = nil
+    var onBarClick: ((String) -> Void)? = nil
     @Environment(\.colorScheme) private var scheme
 
     /// 刻度列宽：按最宽的刻度文字量出来（「44.83亿」「8900万」不截断）。
@@ -625,6 +628,13 @@ struct BarChart: View {
                 ForEach(Array(bars.enumerated()), id: \.element.key) { i, b in
                     let h = b.value > 0 ? max(plotH * CGFloat(Double(b.value) / Double(maxV)), 2) : 0
                     let x = axisWidth + slot * (CGFloat(i) + 0.5)
+                    if b.key == selection {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Theme.accent.opacity(0.16))
+                            .frame(width: max(slot - 2, 1), height: plotH + labelHeight)
+                            .position(x: x, y: topPad + (plotH + labelHeight) / 2)
+                            .allowsHitTesting(false)
+                    }
                     if let st = stacks?[b.key], st.total > 0 {
                         // Codex 橙色在下、Gemini #8E8CF5 在上；只有一段时整根柱子就是那一段的颜色。
                         let hb = h * CGFloat(Double(st.codex) / Double(st.total))
@@ -657,16 +667,24 @@ struct BarChart: View {
                         .stroke(th.ink.opacity(0.25), lineWidth: 0.5)
                         .allowsHitTesting(false)
                 }
-                Color.clear.contentShape(Rectangle())
+                let hoverLayer = Color.clear.contentShape(Rectangle())
                     .onContinuousHover { phase in
                         switch phase {
                         case .active(let p):
-                            let i = Int((p.x - axisWidth) / slot)
-                            hover = (p.x >= axisWidth && i >= 0 && i < bars.count) ? bars[i].key : nil
+                            hover = barKey(at: p.x, axisWidth: axisWidth, slot: slot)
                         case .ended:
                             hover = nil
                         }
                     }
+                if let onBarClick {
+                    hoverLayer.gesture(SpatialTapGesture().onEnded { tap in
+                        guard tap.location.y >= topPad,
+                              let key = barKey(at: tap.location.x, axisWidth: axisWidth, slot: slot) else { return }
+                        onBarClick(key)
+                    })
+                } else {
+                    hoverLayer
+                }
                 if let k = active, let i = bars.firstIndex(where: { $0.key == k }) {
                     if stackedTip, let st = stacks?[k] {
                         // 四行气泡（契约 0.3.1 §2）：按气泡实际宽度夹在图区内，竖直放在图区上部不出界。
@@ -682,6 +700,12 @@ struct BarChart: View {
                 }
             }
         }
+    }
+
+    private func barKey(at x: CGFloat, axisWidth: CGFloat, slot: CGFloat) -> String? {
+        guard slot > 0, x >= axisWidth, x < axisWidth + slot * CGFloat(bars.count) else { return nil }
+        let index = Int((x - axisWidth) / slot)
+        return bars.indices.contains(index) ? bars[index].key : nil
     }
 }
 
