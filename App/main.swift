@@ -61,8 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var statusItemCount = 0
     private var panel: FloatingPanel?
-    private var host: NSHostingView<PanelView>?
-    private var settingsWindow: NSWindow?
+    private var host: NSHostingView<PanelRoot>?
     private let settingsModel = SettingsModel()
     private var outsideMonitor: Any?
     private let contextMenu = NSMenu()
@@ -133,7 +132,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
 
-        if args.contains("--debug-open-settings") {
+        if args.contains("--debug-settings-roundtrip") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugSettingsRoundTrip() }
+        } else if args.contains("--debug-open-settings") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 self.openSettings()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.printRects() }
@@ -234,7 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 面板第一次打开时才创建（SwiftUI/Charts 不在启动时渲染）。
     private func ensurePanel() {
         guard panel == nil else { return }
-        let h = NSHostingView(rootView: PanelView(model: model))
+        let h = NSHostingView(rootView: PanelRoot(model: model, settings: settingsModel))
         // 面板尺寸只由 showPanel 设置，内容变化由 SwiftUI 的滚动区吸收。
         h.sizingOptions = []
         let frame = NSRect(origin: .zero, size: Self.mainPanelSize)
@@ -283,6 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func hidePanel() {
         panel?.orderOut(nil)
+        model.showsSettings = false
         if let m = outsideMonitor { NSEvent.removeMonitor(m); outsideMonitor = nil }
     }
 
@@ -296,6 +298,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             height = min(height, floor(CGFloat(value)))
         }
         return NSSize(width: Self.mainPanelSize.width, height: height)
+    }
+
+    /// CI：使用齿轮与返回共用的动作，核对服务开关、窗口标识和位置。
+    private func debugSettingsRoundTrip() {
+        showPanel(from: statusItem.button)
+        guard let p = panel, let initialHost = host, p.isVisible, debugServices != nil else {
+            print("DEBUG_SETTINGS_ROUNDTRIP failed: missing panel or isolated service preferences")
+            return
+        }
+        let frame = p.frame
+        let number = p.windowNumber
+        let tab = model.shownTab
+        let visibleWindows = Set(NSApp.windows.filter { $0.isVisible }.map { $0.windowNumber })
+        model.onOpenSettings()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            let entered = self.model.showsSettings && self.panel === p && self.host === initialHost
+                && p.windowNumber == number && p.frame == frame && p.isVisible
+                && Set(NSApp.windows.filter { $0.isVisible }.map { $0.windowNumber }) == visibleWindows
+            let other: Service = tab == .codex ? .gemini : .codex
+            self.settingsModel.setService(other, false)
+            let toggled = !self.model.services.isOn(other) && self.model.shownTab == tab
+            self.settingsModel.setService(tab, false)
+            let protectsLast = self.model.services.isOn(tab)
+            self.settingsModel.setService(other, true)
+            self.model.returnToDashboard()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                let returned = !self.model.showsSettings && self.panel === p && self.host === initialHost
+                    && p.windowNumber == number && p.frame == frame && p.isVisible && self.model.shownTab == tab
+                    && self.model.services.isOn(other)
+                    && Set(NSApp.windows.filter { $0.isVisible }.map { $0.windowNumber }) == visibleWindows
+                self.model.onOpenSettings()
+                self.hidePanel()
+                self.showPanel(from: self.statusItem.button)
+                let reopened = !self.model.showsSettings && self.panel === p && p.frame == frame && p.isVisible
+                let ok = entered && toggled && protectsLast && returned && reopened
+                print("DEBUG_SETTINGS_ROUNDTRIP \(ok ? "ok" : "failed") tab=\(tab.rawValue) entered=\(entered) toggled=\(toggled) lastProtected=\(protectsLast) returned=\(returned) reopened=\(reopened)")
+                self.printRects()
+                fflush(stdout)
+            }
+        }
     }
 
     /// 截图用：来回切页签 n 次，每次检查面板顶边、内容视图和窗口是否一致，最后打印截图区域。
@@ -442,10 +484,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         checkUpdates()
     }
 
-    // MARK: 设置窗口（契约 0.2.0 §7）
+    // MARK: 面板内设置
 
     private func openSettings() {
-        hidePanel()
         settingsModel.version = appVersion
         settingsModel.availableUpdate = model.availableUpdate
         settingsModel.launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -458,25 +499,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.updater.updater.automaticallyChecksForUpdates = on
             #endif
         }
-        settingsModel.onCheckUpdates = { [weak self] in
-            NSApp.activate(ignoringOtherApps: true)
-            self?.checkUpdates()
-        }
+        settingsModel.onCheckUpdates = { [weak self] in self?.checkUpdatesFromPanel() }
         settingsModel.onQuit = { quitWithFallback() }
         settingsModel.setService = { [weak self] s, on in self?.setService(s, on: on) }
-        if settingsWindow == nil {
-            // 宽 520、固定尺寸不能缩放（契约 0.3.0 §3）；高度由内容决定（SettingsView 宽度固定）。
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 470),
-                             styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-            w.title = "栏量设置"
-            w.isReleasedWhenClosed = false
-            w.contentViewController = NSHostingController(rootView: SettingsView(model: settingsModel, panel: model))
-            w.center()
-            settingsWindow = w
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        settingsWindow?.orderFrontRegardless()
+        if panel?.isVisible != true { showPanel(from: statusItem.button) }
+        guard panel?.isVisible == true else { return }
+        model.showsSettings = true
+        panel?.makeKey()
     }
 
     private func setLogin(_ on: Bool) {
@@ -501,9 +530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             itemWidth = r.width
             print("DEBUG_RECT_ITEM \(top(r))")
         }
-        if args.contains("--debug-open-settings"), let w = settingsWindow {
-            print("DEBUG_RECT_PANEL \(top(w.frame))")
-        } else if let p = panel { print("DEBUG_RECT_PANEL \(top(p.frame))") }
+        if let p = panel { print("DEBUG_RECT_PANEL \(top(p.frame))") }
         let rs = rows
         let groups = rs.map { "\($0.service.rawValue):\($0.primary)\($0.secondary.map { "+" + $0 } ?? "")" }
         let large = largeMenuBar

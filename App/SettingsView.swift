@@ -14,32 +14,58 @@ final class SettingsModel: ObservableObject {
     var onQuit: () -> Void = {}
 }
 
-/// 设置窗口（契约 0.3.0 §3）：宽 520 固定，三张卡片——监听服务、消耗汇总、通用，最下面一行信息。
+/// 面板内设置：返回导航固定，现有设置卡片和底部操作在其下独立滚动。
 struct SettingsView: View {
     @ObservedObject var model: SettingsModel
     /// 面板数据：登录状态、累计用量、监听服务；数据更新时窗口跟着刷新。
     @ObservedObject var panel: PanelModel
+    let onBack: () -> Void
     @Environment(\.colorScheme) private var scheme
     @State private var quitHover = false
     @State private var linkHover = false
 
     var body: some View {
         let th = Theme(scheme)
-        VStack(alignment: .leading, spacing: 12) {
-            servicesCard(th)
-            summaryCard(th)
-            generalCard(th)
-            footer(th)
+        VStack(spacing: 0) {
+            ZStack(alignment: .leading) {
+                Text("设置").font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(th.ink)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityAddTraits(.isHeader)
+                Button(action: onBack) {
+                    Label("返回", systemImage: "chevron.left")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(th.ink)
+                        .padding(.horizontal, 8)
+                        .frame(height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressStyle())
+                .help("返回主面板")
+                .padding(.leading, 8)
+            }
+            .frame(height: 40)
+            Rectangle().fill(th.line).frame(height: 0.5)
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 12) {
+                    servicesCard(th)
+                    summaryCard(th)
+                    generalCard(th)
+                    footer(th)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
-        .padding(16)
-        .frame(width: 520)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onExitCommand(perform: onBack)
     }
 
     // MARK: 1. 监听服务
 
     func servicesCard(_ th: Theme) -> some View {
         let sel = panel.services
-        return SettingsCard(title: "监听服务", detail: "开启的服务显示在菜单栏和面板里；只开一个时放大显示") {
+        return SettingsCard(title: "监听服务", detail: "开启后在菜单栏和面板显示") {
             VStack(spacing: 0) {
                 ForEach(Array(Service.allCases.enumerated()), id: \.element) { i, s in
                     if i > 0 { Rectangle().fill(th.line).frame(height: 0.5).padding(.leading, 50) }

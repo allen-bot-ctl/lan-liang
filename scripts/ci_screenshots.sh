@@ -107,7 +107,7 @@ for ap in dark light; do
   for t in both codex incomplete longest loading; do
     r=$(awk '/^DEBUG_RECT_PANEL/{print $2}' "/tmp/shots--v030-settings-$t-$ap.log" | tail -n 1)
     echo "RELEASE: settings $t $ap rect=$r"
-    [ "$(cut -d, -f3 <<<"$r")" = 520 ] || { echo "::error::设置窗口宽度不是 520: $r"; exit 1; }
+    [ "$(cut -d, -f3 <<<"$r")" = 400 ] || { echo "::error::设置页面未沿用 400 点面板: $r"; exit 1; }
   done
 done
 # 0.3.1：消耗汇总里和面板同一个柱状图（两个都开堆叠、只开一个单色、Codex 失败只画 Gemini），悬停最高的柱子。
@@ -125,7 +125,7 @@ for ap in dark light; do
   for t in stacked stacked-monthly hover-first hover-last gemini-only single incomplete; do
     r=$(awk '/^DEBUG_RECT_PANEL/{print $2}' "/tmp/shots--v031-settings-$t-$ap.log" | tail -n 1)
     echo "RELEASE: settings v031 $t $ap rect=$r"
-    [ "$(cut -d, -f3 <<<"$r")" = 520 ] || { echo "::error::设置窗口宽度不是 520: $r"; exit 1; }
+    [ "$(cut -d, -f3 <<<"$r")" = 400 ] || { echo "::error::设置页面未沿用 400 点面板: $r"; exit 1; }
   done
 done
 # 0.3.2：菜单栏三列（图标 | 周剩余 | 细竖线 | 5 小时橙色 /「--」灰色），不是模板图。

@@ -3,6 +3,7 @@ import SwiftUI
 /// 面板与菜单栏共用的数据。
 final class PanelModel: ObservableObject {
     @Published var tab: Service = .codex
+    @Published var showsSettings = false
     /// 监听服务（契约 0.3.0 §1）：关掉的服务不显示页签和内容。
     @Published var services = ServiceSelection.all
     @Published var codex = ServiceSnapshot(status: .loading)
@@ -29,18 +30,40 @@ final class PanelModel: ObservableObject {
     var onCheckUpdates: () -> Void = {}
     var onOpenSettings: () -> Void = {}
 
+    func returnToDashboard() { showsSettings = false }
+
     func snapshot(_ s: Service) -> ServiceSnapshot { s == .codex ? codex : gemini }
 
     /// 面板实际显示的服务：当前页签关掉了就显示第一个开着的。
     var shownTab: Service { services.isOn(tab) ? tab : (services.enabled.first ?? tab) }
 }
 
-struct PanelView: View {
+/// 使用同一宿主和面板切换页面；主视图留在树上，保留当前页签和滚动位置。
+struct PanelRoot: View {
     @ObservedObject var model: PanelModel
+    @ObservedObject var settings: SettingsModel
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        let th = Theme(scheme)
+        ZStack {
+            PanelView(model: model)
+                .opacity(model.showsSettings ? 0 : 1)
+                .allowsHitTesting(!model.showsSettings)
+                .accessibilityHidden(model.showsSettings)
+            if model.showsSettings {
+                SettingsView(model: settings, panel: model, onBack: model.returnToDashboard)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .strokeBorder(Theme(scheme).panelStroke, lineWidth: 0.5)
+            .allowsHitTesting(false))
+    }
+}
+
+struct PanelView: View {
+    @ObservedObject var model: PanelModel
+    var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HeaderBar(model: model).zIndex(2)
             if model.services.isSingle {
@@ -56,7 +79,6 @@ struct PanelView: View {
         }
         .frame(width: 400)
         .frame(maxHeight: .infinity, alignment: .top)
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(th.panelStroke, lineWidth: 0.5))
     }
 
     var sections: some View {
