@@ -474,6 +474,7 @@ public final class AgentSessionReader {
         let len = Int(min(info.size - cur.offset, UInt64(Self.chunkBytes)))
         guard let data = fs.read(path, offset: cur.offset, length: len), !data.isEmpty else { return false }
         var session = sessions[k] ?? AgentSession()
+        let before = cur.offset
         let lines = splitLines(data)
         for (i, line) in lines.complete.enumerated() {
             if i == 0 && cur.skipping {  // 上次跳过的长行的剩余部分
@@ -500,7 +501,8 @@ public final class AgentSessionReader {
         session.advance(to: now)
         sessions[k] = session
         cursors[k] = cur
-        return cur.offset < info.size
+        // 只有读满 1MB 上限、而且确实往前读了，才需要接着读；等半行补齐的情况不重试。
+        return len == Self.chunkBytes && cur.offset > before && cur.offset < info.size
     }
 
     public func fileRemoved(_ path: String) { remove(key(path)) }
