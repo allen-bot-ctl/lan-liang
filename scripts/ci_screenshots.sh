@@ -253,6 +253,43 @@ lim both-weekly-codex-daily 75   # 0.3.2：没有 5 小时也留第三列写「-
 # 状态项宽度（只打印）。
 a=$(field "$(mbline low-codex-daily dark)" item); b=$(field "$(mbline max-codex-daily dark)" item); c=$(field "$(mbline codex-5h-codex-daily dark)" item)
 echo "RELEASE: item width low=$a max=$b codex-5h=$c"
+# 0.4.0（契约 §5 B1/B2）：会话小点和面板「会话」一栏。--debug-agent 固定状态（不监听目录，工作中停在亮帧）。
+V040_PANEL=(
+  "v040-panel-working-done codex:working:12,antigravity:done working"
+  "v040-panel-aborted-error codex:aborted,antigravity:error failed"
+  "v040-panel-asking-working codex:asking,antigravity:working:12 asking"
+  "v040-panel-idle codex:idle,antigravity:idle idle"
+  "v040-panel-longest codex:idle,antigravity:working:75 working"
+  "v040-mb-both-done codex:done,antigravity:idle done"
+)
+V040_SINGLE=(
+  "v040-mb-single-working codex:working:3 working"
+  "v040-mb-single-asking codex:asking asking"
+  "v040-mb-single-done codex:done done"
+  "v040-mb-single-aborted codex:aborted failed"
+)
+for ap in dark light; do
+  if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
+  nf="$PWD/fixtures/normal.json"
+  for c in "${V040_PANEL[@]}"; do
+    read -r name agents _ <<<"$c"
+    LANLIANG_FAKE="$nf" shoot "-$name-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex,gemini --debug-tab=codex --debug-agent="$agents"
+  done
+  for c in "${V040_SINGLE[@]}"; do
+    read -r name agents _ <<<"$c"
+    LANLIANG_FAKE="$nf" shoot "-$name-$ap" --debug-open-panel --debug-appearance=$ap --debug-services=codex --debug-agent="$agents"
+  done
+done
+idle_item=$(field "$(mbline v040-panel-idle dark)" item)
+single_idle=$(field "$(mbline v030-single-codex dark)" item)
+for c in "${V040_PANEL[@]}" "${V040_SINGLE[@]}"; do
+  read -r name _ want <<<"$c"
+  for ap in dark light; do
+    l=$(mbline "$name" "$ap")
+    [ "$(field "$l" agent)" = "$want" ] || { echo "::error::$name-$ap 小点状态不对: ${l}（应为 $want）"; exit 1; }
+  done
+  echo "RELEASE: v040 $name agent=$want item=$(field "$(mbline "$name" dark)" item) (idle two-row=$idle_item single=$single_idle)"
+done
 # 0.3.2（PM 04:52 定）：宽度按实际文字，位数变化时宽度跟着变，不再要求相同。
 grep -h "^DEBUG_" /tmp/shots-*.log | sed 's/^/RELEASE: /'
 ls -l shots

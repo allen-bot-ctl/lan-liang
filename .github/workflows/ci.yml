@@ -49,13 +49,21 @@ jobs:
           echo "RELEASE: $(grep -E 'Executed [0-9]+ tests' /tmp/tests.log | tail -n 1)"
           exit "$status"
 
-      - name: No Codex session-log reading (contract 0.1.5 §5)
+      - name: Codex sessions only for status events (contract 0.1.5 §5 as amended by 0.4.0 §0)
         shell: bash
         run: |
-          if grep -rnE '"(archived_)?sessions"|\.jsonl|CodexSessionLog' App Sources; then
-            echo "::error::代码里不应再读取 ~/.codex/sessions"; exit 1
+          # 0.4.0 起只允许会话状态模块读 sessions / *.jsonl（只读状态事件）；其他地方仍不许，用量统计不恢复。
+          if grep -rnE '"(archived_)?sessions"|\.jsonl|CodexSessionLog' App Sources \
+              | grep -vE '^(Sources/LanLiangCore/AgentStatus\.swift|App/AgentWatcher\.swift|App/main\.swift):' ; then
+            echo "::error::只有会话状态模块可以读 ~/.codex/sessions"; exit 1
           fi
-          echo "RELEASE: no ~/.codex/sessions reads"
+          if grep -rnE 'archived_sessions|CodexSessionLog' App Sources; then
+            echo "::error::不应恢复 0.1.5 删掉的本机用量统计"; exit 1
+          fi
+          if grep -nE '"(arguments|output|content|text|message)"' Sources/LanLiangCore/AgentStatus.swift App/AgentWatcher.swift; then
+            echo "::error::会话状态模块不应取正文、arguments、output"; exit 1
+          fi
+          echo "RELEASE: ~/.codex/sessions read only by agent status module"
 
       - name: Build universal app, dmg, zip
         run: scripts/build.sh "$VERSION"
@@ -108,6 +116,14 @@ jobs:
             kill -TERM "$pid" || true; sleep 1; kill -KILL "$pid" 2>/dev/null || true
             echo "RELEASE: smoke=$a alive 8s"
           done
+
+      - name: Idle CPU red line and agent status (0.3.13, 0.4.0)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ci_v0313_menubar_cpu.sh
+          grep -h '^DEBUG_MENUBAR_RENDER ok' shots/v0313/cpu-*.log | sed 's/^/RELEASE: /'
+          bash scripts/ci_v040_agent_status.sh
 
       - name: Screenshots
         run: scripts/ci_screenshots.sh

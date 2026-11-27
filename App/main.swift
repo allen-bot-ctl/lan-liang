@@ -120,6 +120,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let rows: [MenuBarGroup]
         let height: CGFloat
         let palette: MenuBarLayout.Palette?
+        /// 0.4.0 会话小点（空闲 = 不画）；闪烁只换图，不进这个键。
+        let dot: AgentPhase
     }
     private var statusDisplayKey: StatusDisplayKey?
     private var installedMenuBarWidth = NSStatusItem.variableLength
@@ -127,6 +129,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var menuBarRasters = 0
     private var menuBarWidthWrites = 0
     private lazy var source: DataSource = makeDataSource()
+    // 0.4.0 会话状态
+    private var agentWatcher: AgentWatcher?
+    private var menuBarFrames: [NSImage] = []
+    private var blinkIndex = 0
+    private var blinkTimer: Timer?
+    private var menuBarFrameSwaps = 0
+    private let agentDebugRoot = NSTemporaryDirectory() + "lanliang-agent-status-\(getpid())"
+    private var agentDebugFiles: (codex: String, antigravity: String)?
     private let args = CommandLine.arguments
     private var isDebug: Bool { args.contains { $0.hasPrefix("--debug-") } || ProcessInfo.processInfo.environment["LANLIANG_FAKE"] != nil }
 
@@ -156,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 监听服务（契约 0.3.0 §1）：截图用 --debug-services 覆盖，不写盘。
         model.services = debugServices ?? ServiceSelection.load(from: .standard)
         keepTabEnabled()
+        setupAgentStatus()
         if let r = argValue("debug-range"), let v = TokenRange(rawValue: r) { model.range = v }
         model.hoverKey = argValue("debug-hover")
         model.onRefresh = { [weak self] in
@@ -209,7 +220,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
 
-        if args.contains("--debug-menubar-render") {
+        if args.contains("--debug-agent-status") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugAgentStatus() }
+        } else if args.contains("--debug-menubar-render") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.debugMenuBarRendering() }
         } else if args.contains("--debug-history-lifecycle") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.debugHistoryLifecycle() }
@@ -299,16 +312,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let rs = rows
         let height = NSStatusBar.system.thickness
         let palette = rs.isEmpty ? nil : MenuBarLayout.Palette.resolve(b.effectiveAppearance)
-        let key = StatusDisplayKey(rows: rs, height: height, palette: palette)
+        let dot: AgentPhase = rs.isEmpty ? .idle : model.visibleAgents.dot
+        let key = StatusDisplayKey(rows: rs, height: height, palette: palette, dot: dot)
         guard key != statusDisplayKey else { return }
 
         let img: NSImage?
         let width: CGFloat
-        if let palette, let raster = MenuBarLayout.image(rs, height: height, palette: palette) {
+        if let palette, let raster = MenuBarLayout.image(rs, height: height, palette: palette, dot: dot) {
             img = raster
             width = ceil(raster.size.width) + itemPadding
             menuBarRasters += 1
+            // 工作中慢闪：亮、暗两帧这里一起渲染好，之后每秒只换图（契约 0.4.0 §2）。
+            var frames = [raster]
+            if AgentDotStyle.blinks(dot), blinkAllowed,
+               let dim = MenuBarLayout.image(rs, height: height, palette: palette, dot: dot,
+                                             dotAlpha: CGFloat(AgentDotStyle.dimAlpha)) {
+                frames.append(dim)
+            }
+            menuBarFrames = frames
         } else {
+            menuBarFrames = []
             img = symbol("chart.bar.fill", label: "栏量")
             width = NSStatusItem.variableLength
             // A transient allocation failure may recover on a later real refresh.
@@ -326,6 +349,207 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menuBarInstalls += 1
         b.image = img
+        restartBlink()
+    }
+
+    /// 「减少动态效果」打开时常亮；截图（--debug-agent）停在亮帧。
+    private var blinkAllowed: Bool {
+        !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && argValue("debug-agent") == nil
+    }
+
+    private func restartBlink() {
+        blinkTimer?.invalidate()
+        blinkTimer = nil
+        blinkIndex = 0
+        if menuBarFrames.count == 2 { scheduleBlink() }
+    }
+
+    /// 一次性定时器链：每 1 秒切一帧，只换图，不重排版、不改宽度。
+    private func scheduleBlink() {
+        let t = Timer(timeInterval: AgentDotStyle.blinkInterval, repeats: false) { [weak self] _ in
+            guard let self, self.menuBarFrames.count == 2, let b = self.statusItem.button else { return }
+            self.blinkIndex = 1 - self.blinkIndex
+            b.image = self.menuBarFrames[self.blinkIndex]
+            self.menuBarFrameSwaps += 1
+            self.scheduleBlink()
+        }
+        blinkTimer = t
+        RunLoop.main.add(t, forMode: .common)
+    }
+
+    // MARK: 会话状态（契约 0.4.0）
+
+    private func setupAgentStatus() {
+        if let d = argValue("debug-agent") {
+            // 截图：固定状态，不监听任何目录。
+            model.agents = AgentSnapshot.parseDebug(d, now: source.fixedNow ?? Date())
+            return
+        }
+        let roots: AgentWatcher.Roots
+        if args.contains("--debug-agent-status") {
+            agentDebugFiles = prepareAgentDebugRoot()
+            roots = AgentWatcher.roots(under: agentDebugRoot)
+        } else if let r = ProcessInfo.processInfo.environment["LANLIANG_AGENT_ROOT"], !r.isEmpty {
+            roots = AgentWatcher.roots(under: r)
+        } else if isDebug {
+            return  // 截图 / CI 不读本机会话
+        } else {
+            roots = AgentWatcher.defaultRoots()
+        }
+        let w = AgentWatcher(roots: roots)
+        w.keepsEventLog = args.contains("--debug-agent-status")
+        w.onChange = { [weak self] snap in
+            guard let self else { return }
+            self.model.agents = snap
+            self.updateMenuBar()
+        }
+        agentWatcher = w
+        updateAgentWatch()
+    }
+
+    /// 跟随「监听服务」；随额度刷新顺带看一次目录有没有出现。
+    private func updateAgentWatch() {
+        agentWatcher?.update(codex: model.services.codex, antigravity: model.services.gemini)
+    }
+
+    private func prepareAgentDebugRoot() -> (codex: String, antigravity: String) {
+        let fm = FileManager.default
+        let r = AgentWatcher.roots(under: agentDebugRoot)
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        let day = r.codex + String(format: "/%04d/%02d/%02d", c.year ?? 2026, c.month ?? 1, c.day ?? 1)
+        try? fm.createDirectory(atPath: day, withIntermediateDirectories: true)
+        try? fm.createDirectory(atPath: r.antigravity + "/debug-session", withIntermediateDirectories: true)
+        return (day + "/rollout-debug.jsonl", r.antigravity + "/debug-session/transcript.jsonl")
+    }
+
+    private func appendLine(_ line: String, to path: String) {
+        let data = Data((line + "\n").utf8)
+        if let h = FileHandle(forWritingAtPath: path) {
+            h.seekToEndOfFile()
+            h.write(data)
+            h.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: path, contents: data)
+        }
+    }
+
+    /// CI：往假目录依次追加事件，断言状态序列；工作中闪烁期间只换图、不重渲染、不改宽度。
+    private func debugAgentStatus() {
+        guard let files = agentDebugFiles, let w = agentWatcher else {
+            print("DEBUG_AGENT_STATUS failed: no watcher"); fflush(stdout); return
+        }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        func codex(_ type: String, _ payload: String) -> String {
+            "{\"timestamp\":\"\(iso.string(from: Date()))\",\"type\":\"\(type)\",\"payload\":\(payload)}"
+        }
+        func ag(_ status: String) -> String {
+            "{\"type\":\"PLANNER_RESPONSE\",\"status\":\"\(status)\",\"source\":\"MODEL\",\"created_at\":\"\(iso.string(from: Date()))\",\"step_index\":1,\"content\":\"DEBUG_SECRET_MARKER\"}"
+        }
+        typealias Expect = (AgentPhase, AgentPhase)
+        struct Step { let name: String; let write: () -> Void; let expect: Expect; let settle: Bool }
+        let cf = files.codex, af = files.antigravity
+        let steps: [Step] = [
+            Step(name: "task_started", write: {
+                self.appendLine(codex("session_meta", "{\"id\":\"debug\"}"), to: cf)
+                self.appendLine(codex("event_msg", "{\"type\":\"task_started\"}"), to: cf)
+            }, expect: (.working, .idle), settle: false),
+            Step(name: "ask", write: {
+                self.appendLine(codex("response_item", "{\"type\":\"function_call\",\"name\":\"request_user_input_async\",\"arguments\":\"{\\\"q\\\":\\\"DEBUG_SECRET_MARKER\\\"}\",\"call_id\":\"call_dbg_1\"}"), to: cf)
+            }, expect: (.asking, .idle), settle: false),
+            Step(name: "ask_output", write: {
+                self.appendLine(codex("response_item", "{\"type\":\"function_call_output\",\"call_id\":\"call_dbg_1\",\"output\":\"DEBUG_SECRET_MARKER\"}"), to: cf)
+            }, expect: (.working, .idle), settle: false),
+            Step(name: "task_complete", write: {
+                self.appendLine(codex("event_msg", "{\"type\":\"task_complete\"}"), to: cf)
+            }, expect: (.done, .idle), settle: false),
+            Step(name: "turn_aborted", write: {
+                self.appendLine(codex("event_msg", "{\"type\":\"turn_aborted\"}"), to: cf)
+            }, expect: (.failed, .idle), settle: false),
+            Step(name: "RUNNING", write: { self.appendLine(ag("RUNNING"), to: af) }, expect: (.failed, .working), settle: false),
+            Step(name: "DONE_debounce", write: { self.appendLine(ag("DONE"), to: af) }, expect: (.failed, .working), settle: true),
+            Step(name: "DONE", write: {}, expect: (.failed, .done), settle: false),
+            Step(name: "ERROR", write: { self.appendLine(ag("ERROR"), to: af) }, expect: (.failed, .failed), settle: false),
+            Step(name: "bad_lines", write: {
+                self.appendLine("{not json", to: cf)
+                self.appendLine("\"just a string\"", to: af)
+                self.appendLine("{\"status\":42}", to: af)
+            }, expect: (.failed, .failed), settle: true),
+            Step(name: "unknown", write: {
+                self.appendLine(codex("event_msg", "{\"type\":\"some_future_event\"}"), to: cf)
+                self.appendLine(codex("response_item", "{\"type\":\"function_call\",\"name\":\"shell\",\"call_id\":\"call_x\"}"), to: cf)
+                self.appendLine(ag("USER_INPUT"), to: af)
+                self.appendLine(ag("SOMETHING_NEW"), to: af)
+            }, expect: (.failed, .failed), settle: true),
+        ]
+        var seq: [String] = []
+        var blink = "skipped"
+        var widthsAfterFirst = -1
+        func phases() -> Expect { (model.agents.codex?.phase ?? .idle, model.agents.antigravity?.phase ?? .idle) }
+        func finish(_ ok: Bool, _ why: String) {
+            let log = (w.eventLog(.codex) + w.eventLog(.antigravity))
+            let leak = log.contains { $0.contains("DEBUG_SECRET_MARKER") || $0.contains("debug-session") }
+            let good = ok && !leak
+            let widths = widthsAfterFirst < 0 ? -1 : menuBarWidthWrites - widthsAfterFirst
+            print("DEBUG_AGENT_STATUS \(good ? "ok" : "failed") \(why) seq=\(seq.joined(separator: ",")) blink=\(blink) widths=\(widths) events=\(log.joined(separator: ",")) reduceMotion=\(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)")
+            fflush(stdout)
+        }
+        func run(_ i: Int) {
+            guard i < steps.count else {
+                let widths = menuBarWidthWrites - widthsAfterFirst
+                finish(widths == 0, "steps=\(steps.count)")
+                return
+            }
+            let st = steps[i]
+            st.write()
+            var waited = 0.0
+            func poll() {
+                let p = phases()
+                let match = p == st.expect
+                if (st.settle && waited >= 2.5) || (!st.settle && match) {
+                    guard match else {
+                        finish(false, "at=\(st.name) codex=\(p.0.debugName) antigravity=\(p.1.debugName)")
+                        return
+                    }
+                    seq.append("\(st.name)=\(p.0.debugName)/\(p.1.debugName)")
+                    if i == 0 { widthsAfterFirst = menuBarWidthWrites }
+                    if st.name == "ask" && menuBarFrames.count != 1 {
+                        finish(false, "at=ask frames=\(menuBarFrames.count)"); return
+                    }
+                    if st.name == "ask_output" {
+                        // 工作中闪烁 3 秒：只换图。
+                        let counts = (menuBarRasters, menuBarInstalls, menuBarWidthWrites, menuBarFrameSwaps)
+                        let frames = menuBarFrames
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) {
+                            let swaps = self.menuBarFrameSwaps - counts.3
+                            let rasters = self.menuBarRasters - counts.0
+                            let installs = self.menuBarInstalls - counts.1
+                            let widths = self.menuBarWidthWrites - counts.2
+                            let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                            let sameFrames = frames.count == self.menuBarFrames.count && zip(frames, self.menuBarFrames).allSatisfy { $0 === $1 }
+                            let shown = self.statusItem.button?.image
+                            let showsFrame = frames.contains { $0 === shown }
+                            blink = "swaps=\(swaps),rasters=\(rasters),installs=\(installs),widths=\(widths),frames=\(frames.count)"
+                            let ok = rasters == 0 && installs == 0 && widths == 0 && sameFrames && showsFrame &&
+                                (reduce ? swaps == 0 : (frames.count == 2 && swaps >= 2 && swaps <= 4))
+                            guard ok else { finish(false, "at=blink"); return }
+                            run(i + 1)
+                        }
+                        return
+                    }
+                    run(i + 1)
+                    return
+                }
+                if waited >= 8 {
+                    finish(false, "at=\(st.name) timeout codex=\(p.0.debugName) antigravity=\(p.1.debugName)")
+                    return
+                }
+                waited += 0.25
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { poll() }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { poll() }
+        }
+        run(0)
     }
 
     @objc private func clicked(_ sender: NSButton) {
@@ -604,7 +828,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let burstCoreSeconds = String(format: "%.4f", t2.cpu - t1.cpu)
                     let idleWallSeconds = String(format: "%.3f", t1.wall - t0.wall)
                     let burstWallSeconds = String(format: "%.3f", t2.wall - t1.wall)
-                    print("DEBUG_MENUBAR_RENDER \(ok ? "ok" : "failed") rows=\(before.rows.count) bitmap=\(initialConcrete) idleStable=\(idleStable) burstStable=\(burstStable) appearance=\(appearanceChanged) rasters=\(rasterDelta) installs=\(installDelta) widths=\(widthDelta) idleCPU=\(idleText)% burstCPU=\(burstText)% idleCoreSeconds=\(idleCoreSeconds) idleWallSeconds=\(idleWallSeconds) burstCoreSeconds=\(burstCoreSeconds) burstWallSeconds=\(burstWallSeconds)")
+                    print("DEBUG_MENUBAR_RENDER \(ok ? "ok" : "failed") rows=\(before.rows.count) bitmap=\(initialConcrete) idleStable=\(idleStable) burstStable=\(burstStable) appearance=\(appearanceChanged) rasters=\(rasterDelta) installs=\(installDelta) widths=\(widthDelta) idleCPU=\(idleText)% burstCPU=\(burstText)% idleCoreSeconds=\(idleCoreSeconds) idleWallSeconds=\(idleWallSeconds) burstCoreSeconds=\(burstCoreSeconds) burstWallSeconds=\(burstWallSeconds) agentWatch=\(self.agentWatcher?.isWatching == true)")
                     fflush(stdout)
                 }
             }
@@ -766,6 +990,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         pendingRefresh = false
+        updateAgentWatch()
         model.refreshing = true
         if let now = source.fixedNow { model.now = { now } }
         let selection = model.services
@@ -856,6 +1081,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.services = new
         if debugServices == nil { new.save(to: .standard) }
         keepTabEnabled()
+        updateAgentWatch()
         updateMenuBar()
         if on {
             loadGeminiHistoryCache()
@@ -982,7 +1208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let dark = (statusItem.button?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua) ? 1 : 0
         print("DEBUG_MENUBAR_WIDTH content=\(content) item=\(Int(itemWidth)) style=\(rs.count >= 2 ? "compact" : "single")")
         print("DEBUG_MENUBAR_CELLS cells=\(cells.isEmpty ? "fallback" : cells) dark=\(dark) template=\(statusItem.button?.image?.isTemplate == true ? 1 : 0)")
-        print("DEBUG_MENUBAR items=\(statusItemCount) visible=\(statusItem.isVisible ? 1 : 0) autosave=\(statusItem.autosaveName ?? "") rows=\(rs.count) content=\(content) item=\(Int(itemWidth)) groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ",")) services=\(model.services.debugText) style=\(style)")
+        print("DEBUG_MENUBAR items=\(statusItemCount) visible=\(statusItem.isVisible ? 1 : 0) autosave=\(statusItem.autosaveName ?? "") rows=\(rs.count) content=\(content) item=\(Int(itemWidth)) groups=\(groups.isEmpty ? "fallback" : groups.joined(separator: ",")) services=\(model.services.debugText) style=\(style) agent=\(model.visibleAgents.dot.debugName) agents=\(model.visibleAgents.debugText)")
         fflush(stdout)
     }
 }

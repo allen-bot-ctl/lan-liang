@@ -139,11 +139,17 @@ public enum MenuBarLayout {
     /// Draw both backing scales up front. AppKit status-item replicas only see
     /// concrete bitmap reps, so redraws cannot rerun symbols/CoreText via NSCustomImageRep.
     public static func image(_ rows: [MenuBarGroup], height: CGFloat, large: Bool = false,
-                             appearance: NSAppearance? = nil) -> NSImage? {
-        image(rows, height: height, large: large, palette: Palette.resolve(appearance))
+                             appearance: NSAppearance? = nil, dot: AgentPhase = .idle, dotAlpha: CGFloat = 1) -> NSImage? {
+        image(rows, height: height, large: large, palette: Palette.resolve(appearance), dot: dot, dotAlpha: dotAlpha)
     }
 
-    static func image(_ rows: [MenuBarGroup], height: CGFloat, large: Bool = false, palette: Palette) -> NSImage? {
+    /// 会话小点（契约 0.4.0 §2）：额度文字块右侧，左边距 4pt、直径 6pt，垂直居中；空闲不画、不占位。
+    public static func dotWidth(_ dot: AgentPhase) -> CGFloat {
+        AgentDotStyle.rgb(dot, dark: false) == nil ? 0 : CGFloat(AgentDotStyle.extraWidth)
+    }
+
+    static func image(_ rows: [MenuBarGroup], height: CGFloat, large: Bool = false, palette: Palette,
+                      dot: AgentPhase = .idle, dotAlpha: CGFloat = 1) -> NSImage? {
         let rows = Array(rows.prefix(2))
         guard !rows.isEmpty, height.isFinite, height > 0 else { return nil }
         let st = style(rowCount: rows.count, large: large)
@@ -151,7 +157,8 @@ public enum MenuBarLayout {
         let c = columns(rows, large: large)
         let singleRow = rows.count == 1
         let contentWidth = width(rows, large: large)
-        let w = singleRow ? ceil(contentWidth) : contentWidth
+        let textW = singleRow ? ceil(contentWidth) : contentWidth
+        let w = textW + dotWidth(dot)
         let size = NSSize(width: w, height: height)
         let img = NSImage(size: size)
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
@@ -208,6 +215,14 @@ public enum MenuBarLayout {
                 let sec = secondaryText(row)
                 draw(sec.text, font: secondaryFont(row, st), x: pos.secondary,
                      color: sec.isPlaceholder ? label.withAlphaComponent(placeholderAlpha) : orange)
+            }
+            if let rgb = AgentDotStyle.rgb(dot, dark: palette.dark) {
+                let d = CGFloat(AgentDotStyle.diameter)
+                let x = textW + CGFloat(AgentDotStyle.gap)
+                let y = ((height - d) / 2 * scale).rounded() / scale
+                ctx.setFillColor(CGColor(srgbRed: CGFloat(rgb.r) / 255, green: CGFloat(rgb.g) / 255,
+                                         blue: CGFloat(rgb.b) / 255, alpha: dotAlpha))
+                ctx.fillEllipse(in: CGRect(x: x, y: y, width: d, height: d))
             }
             NSGraphicsContext.restoreGraphicsState()
             guard let raster = ctx.makeImage() else { return nil }

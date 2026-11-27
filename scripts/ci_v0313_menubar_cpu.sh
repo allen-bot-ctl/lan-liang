@@ -7,6 +7,10 @@ source ./project.env
 bin="build/${NAME}.app/Contents/MacOS/$NAME"
 out="$PWD/shots/v0313"
 mkdir -p "$out"
+# 0.4.0 §5 B3：开着会话监听（假目录，12 秒内不写入）照样守住红线。
+agent_root="$(mktemp -d)"
+mkdir -p "$agent_root/codex/sessions/$(date +%Y/%m/%d)" "$agent_root/antigravity/brain"
+export LANLIANG_AGENT_ROOT="$agent_root"
 pid=
 cleanup() {
     if [[ -n "${pid:-}" ]]; then
@@ -28,7 +32,7 @@ test_case() {
         sleep 1
     done
     cat "$log"
-    grep -Eq "^DEBUG_MENUBAR_RENDER ok rows=$rows bitmap=true idleStable=true burstStable=true appearance=true rasters=1 installs=1 widths=0 idleCPU=[0-9.]+% burstCPU=[0-9.]+%" "$log"
+    grep -Eq "^DEBUG_MENUBAR_RENDER ok rows=$rows bitmap=true idleStable=true burstStable=true appearance=true rasters=1 installs=1 widths=0 idleCPU=[0-9.]+% burstCPU=[0-9.]+%.* agentWatch=true" "$log"
     cleanup
 }
 test_case 1 gemini light

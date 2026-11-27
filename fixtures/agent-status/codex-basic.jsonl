@@ -1,0 +1,7 @@
+{"timestamp":"2026-11-27T08:00:00.000Z","type":"session_meta","payload":{"id":"FIXTURE_SESSION_ID_123","cwd":"/tmp/FIXTURE_MARKER_BODY"}}
+{"timestamp":"2026-11-27T08:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2026-11-27T08:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"FIXTURE_MARKER_BODY"}]}}
+{"timestamp":"2026-11-27T08:00:03.000Z","type":"event_msg","payload":{"type":"token_count","info":null}}
+{"timestamp":"2026-11-27T08:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","arguments":"{\"question\":\"FIXTURE_MARKER_BODY\"}","call_id":"call_fixture_1"}}
+{"timestamp":"2026-11-27T08:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_fixture_1","output":"FIXTURE_MARKER_BODY"}}
+{"timestamp":"2026-11-27T08:00:06.000Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"FIXTURE_MARKER_BODY"}}

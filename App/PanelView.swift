@@ -28,6 +28,8 @@ final class PanelModel: ObservableObject {
     @Published var hoverKey: String? = nil
     /// 截图用：强制悬停顶栏按钮（refresh / update / settings）。
     @Published var hoverButton: String? = nil
+    /// 0.4.0 会话状态（监听模块归并后的结果；关掉的服务在 visibleAgents 里去掉）。
+    @Published var agents = AgentSnapshot()
     var appVersion = ""
     var now: () -> Date = { Date() }
     var onRefresh: () -> Void = {}
@@ -37,6 +39,12 @@ final class PanelModel: ObservableObject {
     func returnToDashboard() { showsSettings = false }
 
     func snapshot(_ s: Service) -> ServiceSnapshot { s == .codex ? codex : gemini }
+
+    /// 跟随「监听服务」（契约 0.4.0 §1.5）：Codex 关 → 不显示 Codex 会话；Gemini 关 → 不显示 Antigravity 会话。
+    var visibleAgents: AgentSnapshot {
+        AgentSnapshot(codex: services.codex ? (agents.codex ?? .idle) : nil,
+                      antigravity: services.gemini ? (agents.antigravity ?? .idle) : nil)
+    }
 
     /// 面板实际显示的服务：当前页签关掉了就显示第一个开着的。
     var shownTab: Service { services.isOn(tab) ? tab : (services.enabled.first ?? tab) }
@@ -87,7 +95,10 @@ struct PanelView: View {
 
     var sections: some View {
         let tab = model.shownTab
+        let agents = model.visibleAgents
         return VStack(alignment: .leading, spacing: 8) {
+            // 0.4.0：「会话」一栏在两个页签里都是滚动内容的第一栏。
+            if agents.isShown { AgentSection(agents: agents, now: model.now) }
             ServiceSection(service: tab, snap: model.snapshot(tab), now: model.now(),
                            single: model.services.isSingle)
             if tab == .codex, model.codex.status != .notLoggedIn, model.codex.status != .apiKeyOnly {
@@ -100,6 +111,48 @@ struct PanelView: View {
         }
         .padding(12)
         .frame(width: 400, alignment: .leading)
+    }
+}
+
+// MARK: 会话（契约 0.4.0 §3）
+
+struct AgentSection: View {
+    let agents: AgentSnapshot
+    let now: () -> Date
+    @Environment(\.colorScheme) private var scheme
+
+    static func color(_ p: AgentPhase, dark: Bool) -> Color? {
+        guard let c = AgentDotStyle.rgb(p, dark: dark) else { return nil }
+        return Color(.sRGB, red: Double(c.r) / 255, green: Double(c.g) / 255, blue: Double(c.b) / 255, opacity: 1)
+    }
+
+    var body: some View {
+        let th = Theme(scheme)
+        TimelineView(.periodic(from: Date(), by: 30)) { _ in
+            let t = now()
+            VStack(alignment: .leading, spacing: 4) {
+                Text("会话").font(.system(size: 12, weight: .semibold)).foregroundColor(th.ink2)
+                ForEach(AgentTool.allCases, id: \.self) { tool in
+                    if let st = agents.status(tool) {
+                        let c = Self.color(st.phase, dark: th.dark)
+                        HStack(spacing: 0) {
+                            Circle().fill(c ?? Color.clear).frame(width: 6, height: 6)
+                            Text(tool.title).font(.system(size: 13)).foregroundColor(th.ink)
+                                .lineLimit(1).padding(.leading, 6)
+                                .frame(width: 90, alignment: .leading)
+                            Spacer(minLength: 8)
+                            Text(AgentStatusText.text(st, tool: tool, now: t))
+                                .font(.system(size: 12).monospacedDigit())
+                                .foregroundColor(c ?? th.ink3)
+                                .lineLimit(1).fixedSize()
+                        }
+                        .frame(height: 22)
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+            .card(th)
+        }
     }
 }
 
