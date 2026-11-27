@@ -4,6 +4,8 @@ import XCTest
 /// 内存文件系统：统计列目录、打开次数和读取字节数（契约 0.4.0 §5 A9）。
 final class MemFS: AgentFileSystem {
     var files: [String: (data: Data, mtime: Date)] = [:]
+    /// 创建时间：第一次写入的时间（0.4.1 分辨启动后才出现的文件）。
+    var created: [String: Date] = [:]
     var dirs: Set<String> = []
     var listed: [String] = []
     var opens: [String] = []
@@ -16,6 +18,7 @@ final class MemFS: AgentFileSystem {
     }
     func write(_ p: String, _ s: String, mtime: Date) {
         mkdir((p as NSString).deletingLastPathComponent)
+        if files[p] == nil { created[p] = mtime }
         files[p] = (Data(s.utf8), mtime)
     }
     func append(_ p: String, _ s: String, mtime: Date) {
@@ -29,7 +32,7 @@ final class MemFS: AgentFileSystem {
             .map { ($0 as NSString).lastPathComponent }))
     }
     func info(_ path: String) -> AgentFileInfo? {
-        if let f = files[path] { return AgentFileInfo(size: UInt64(f.data.count), mtime: f.mtime, isDirectory: false) }
+        if let f = files[path] { return AgentFileInfo(size: UInt64(f.data.count), mtime: f.mtime, isDirectory: false, created: created[path]) }
         if dirs.contains(path) { return AgentFileInfo(size: 0, mtime: .distantPast, isDirectory: true) }
         return nil
     }
@@ -60,7 +63,31 @@ final class AgentStatusTests: XCTestCase {
     func out(_ id: String) -> String {
         "{\"timestamp\":\"2026-11-27T08:00:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"\(id)\",\"output\":\"SECRET_OUTPUT\"}}\n"
     }
-    func st(_ s: String) -> String { "{\"type\":\"PLANNER_RESPONSE\",\"status\":\"\(s)\",\"source\":\"MODEL\",\"step_index\":1}\n" }
+    /// 带 tool_calls 的中间步骤（0.4.1：工作中；status=ERROR 为出错）。
+    func st(_ s: String) -> String { "{\"type\":\"PLANNER_RESPONSE\",\"status\":\"\(s)\",\"source\":\"MODEL\",\"step_index\":1,\"tool_calls\":[{}]}\n" }
+    /// 一行 Antigravity 记录（只有字段名，没有正文）。
+    func rec(_ type: String, status: String = "DONE", source: String = "MODEL", tools: String? = nil) -> String {
+        "{\"type\":\"\(type)\",\"status\":\"\(status)\",\"source\":\"\(source)\",\"created_at\":\"2026-11-27T09:00:00Z\",\"step_index\":1" + (tools.map { ",\"tool_calls\":\($0)" } ?? "") + "}\n"
+    }
+    /// 最终回复：不带 tool_calls 的 PLANNER_RESPONSE。
+    var fin: String { rec("PLANNER_RESPONSE") }
+    var fixtureDir: URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("fixtures/agent-status")
+    }
+    /// 老板 Mac 上 09:15:04–09:18:40 的真实序列（step 20–49）：(step, 距第一行秒数, 行)。
+    func realSequence() throws -> [(step: Int, offset: TimeInterval, line: String)] {
+        let text = try String(contentsOf: fixtureDir.appendingPathComponent("antigravity-real.jsonl"))
+        var out: [(step: Int, offset: TimeInterval, line: String)] = []
+        var first: Date?
+        for l in text.split(separator: "\n") {
+            let o = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(l.utf8)) as? [String: Any])
+            let d = try XCTUnwrap(ISO8601DateFormatter().date(from: o["created_at"] as! String))
+            if first == nil { first = d }
+            out.append((step: o["step_index"] as! Int, offset: d.timeIntervalSince(first!), line: String(l) + "\n"))
+        }
+        return out
+    }
 
     func codex(_ fs: MemFS) -> AgentSessionReader { AgentSessionReader(tool: .codex, root: croot, fs: fs, calendar: utc) }
     func ag(_ fs: MemFS) -> AgentSessionReader { AgentSessionReader(tool: .antigravity, root: aroot, fs: fs, calendar: utc) }
@@ -85,30 +112,157 @@ final class AgentStatusTests: XCTestCase {
         XCTAssertEqual(AgentStatusText.text(r.status(now: t0 + 3), tool: .codex, now: t0 + 3), "已中断")
     }
 
-    // A2
-    func testAntigravityDebounce() {
-        let fs = MemFS(); let r = ag(fs); let p = aroot + "/x/transcript.jsonl"
+    // 0.4.1 §D1：真实序列逐行断言
+    func testV041RealSequence() throws {
+        let seq = try realSequence()
+        XCTAssertEqual(seq.map { $0.step }, Array(20...49))
+        let fs = MemFS(); let r = ag(fs); let p = aroot + "/s/.system_generated/logs/transcript.jsonl"
         fs.mkdir(aroot); r.start(now: t0)
-        push(r, fs, p, st("RUNNING"), at: t0)
-        XCTAssertEqual(r.status(now: t0).phase, .working)
-        push(r, fs, p, st("DONE"), at: t0 + 1)
-        XCTAssertEqual(r.status(now: t0 + 5.9).phase, .working)
-        XCTAssertEqual(r.nextDeadline(), t0 + 6)
-        XCTAssertEqual(r.status(now: t0 + 6).phase, .done)
-        // DONE 后 5 秒内 RUNNING → 保持工作中
-        push(r, fs, p, st("RUNNING"), at: t0 + 10)
-        push(r, fs, p, st("DONE"), at: t0 + 11)
-        push(r, fs, p, st("RUNNING"), at: t0 + 14)
-        XCTAssertEqual(r.status(now: t0 + 30).phase, .working)
-        push(r, fs, p, st("USER_INPUT"), at: t0 + 31)
-        XCTAssertEqual(r.status(now: t0 + 31).phase, .working)
-        push(r, fs, p, st("ERROR"), at: t0 + 32)
-        XCTAssertEqual(r.status(now: t0 + 32).phase, .failed)
-        XCTAssertEqual(AgentStatusText.text(r.status(now: t0 + 32), tool: .antigravity, now: t0 + 32), "出错")
+        for (step, off, line) in seq {
+            // 两行之间（包括 09:15:08→09:15:25 停 17 秒）：上一步是工作中就一直是工作中
+            if step != 20 && step != 33 { XCTAssertNotEqual(r.status(now: t0 + off - 0.5).phase, .idle, "before \(step)") }
+            push(r, fs, p, line, at: t0 + off)
+            let want: AgentPhase = step == 32 ? .done : .working
+            XCTAssertEqual(r.status(now: t0 + off).phase, want, "step \(step)")
+        }
+        XCTAssertEqual(r.status(now: t0 + 20).phase, .working) // 17 秒停顿中间
+        // 一轮中途 AgentDotStyle 不变：刚完成之后 USER_INPUT 立刻回到工作中，前面已逐行断言
+    }
+
+    // 0.4.1 §D2：做到一半启动栏量（step 35–49，没有 USER_INPUT）
+    func testV041StartMidTurn() throws {
+        let tail = try realSequence().filter { $0.step >= 35 }.map { $0.line }.joined()
+        let now = t0
+        let fs = MemFS(); fs.write(aroot + "/s/.system_generated/logs/transcript.jsonl", tail, mtime: now - 10)
+        let r = ag(fs); r.start(now: now)
+        XCTAssertEqual(r.status(now: now).phase, .working)
+        XCTAssertEqual(r.status(now: now).since, now - 10)
+        let f2 = MemFS(); f2.write(aroot + "/s/.system_generated/logs/transcript.jsonl", tail, mtime: now - 660)
+        let r2 = ag(f2); r2.start(now: now)
+        XCTAssertEqual(r2.status(now: now).phase, .idle)
+    }
+
+    // 0.4.1 §D3：启动时最后一行是结束记录；出错不补显示
+    func testV041StartAfterFinal() throws {
+        let body = try realSequence().filter { $0.step >= 40 }.map { $0.line }.joined()
+        let now = t0
+        let p = aroot + "/s/.system_generated/logs/transcript.jsonl"
+        let fs = MemFS(); fs.write(p, body + fin + "not json\n", mtime: now - 30)
+        let r = ag(fs); r.start(now: now)
+        XCTAssertEqual(r.status(now: now).phase, .done)
+        XCTAssertEqual(r.status(now: now + 29).phase, .done)
+        XCTAssertEqual(r.status(now: now + 30).phase, .idle)
+        let f2 = MemFS(); f2.write(p, body + fin, mtime: now - 90)
+        let r2 = ag(f2); r2.start(now: now)
+        XCTAssertEqual(r2.status(now: now).phase, .idle)
+        let f3 = MemFS(); f3.write(p, body + rec("ERROR_MESSAGE", source: "SYSTEM"), mtime: now - 5)
+        let r3 = ag(f3); r3.start(now: now)
+        XCTAssertEqual(r3.status(now: now).phase, .idle)
+    }
+
+    // 0.4.1 §D4：刚完成后被后台任务唤醒
+    func testV041WokenAfterFinal() {
+        let fs = MemFS(); let r = ag(fs); let p = aroot + "/x/transcript.jsonl"
+        push(r, fs, p, rec("USER_INPUT", source: "USER_EXPLICIT") + st("DONE"), at: t0)
+        push(r, fs, p, fin, at: t0 + 1)
+        XCTAssertEqual(r.status(now: t0 + 1).phase, .done)
+        push(r, fs, p, rec("SYSTEM_MESSAGE", source: "SYSTEM"), at: t0 + 5)
+        XCTAssertEqual(r.status(now: t0 + 5).phase, .working)
+        push(r, fs, p, fin, at: t0 + 10)
+        XCTAssertEqual(r.status(now: t0 + 10).phase, .done)
+        XCTAssertEqual(r.status(now: t0 + 70).phase, .idle)
+        push(r, fs, p, rec("SYSTEM_MESSAGE", source: "SYSTEM"), at: t0 + 10 + 1800)
+        XCTAssertEqual(r.status(now: t0 + 10 + 1800).phase, .working)
+    }
+
+    // 0.4.1 §D5：出错
+    func testV041Errors() {
+        for line in [rec("ERROR_MESSAGE", status: "DONE", source: "SYSTEM"), rec("GENERIC", status: "ERROR")] {
+            let fs = MemFS(); let r = ag(fs); let p = aroot + "/x/transcript.jsonl"
+            push(r, fs, p, st("DONE"), at: t0)
+            push(r, fs, p, line, at: t0 + 1)
+            XCTAssertEqual(r.status(now: t0 + 1).phase, .failed, line)
+            XCTAssertEqual(AgentStatusText.text(r.status(now: t0 + 1), tool: .antigravity, now: t0 + 1), "出错")
+            XCTAssertEqual(r.status(now: t0 + 60.9).phase, .failed)
+            XCTAssertEqual(r.status(now: t0 + 61).phase, .idle)
+            // 出错之后再来新行照表走
+            push(r, fs, p, st("DONE"), at: t0 + 70)
+            XCTAssertEqual(r.status(now: t0 + 70).phase, .working)
+        }
+    }
+
+    // 0.4.1 §D6/§D7：CHECKPOINT、tool_calls 为空数组都是结束记录
+    func testV041EndRecords() {
+        for end in [rec("CHECKPOINT"), rec("PLANNER_RESPONSE", tools: "[]"), rec("PLANNER_RESPONSE", tools: "null"), fin] {
+            let fs = MemFS(); let r = ag(fs); let p = aroot + "/x/transcript.jsonl"
+            push(r, fs, p, rec("USER_INPUT", source: "USER_EXPLICIT") + rec("PLANNER_RESPONSE", tools: "[{}]"), at: t0)
+            XCTAssertEqual(r.status(now: t0).phase, .working)
+            push(r, fs, p, end, at: t0 + 1)
+            XCTAssertEqual(r.status(now: t0 + 1).phase, .done, end)
+            XCTAssertEqual(r.status(now: t0 + 61).phase, .idle)
+        }
         // 深一层的位置也认
-        let deep = aroot + "/y/.system_generated/logs/transcript.jsonl"
-        XCTAssertTrue(r.accepts(deep))
+        let r = ag(MemFS())
+        XCTAssertTrue(r.accepts(aroot + "/y/.system_generated/logs/transcript.jsonl"))
         XCTAssertFalse(r.accepts(aroot + "/y/other.jsonl"))
+    }
+
+    // 0.4.1 §D8：中途打断靠 10 分钟兜底；坏行也重置计时；超长行算工作中
+    func testV041Interrupted() {
+        let fs = MemFS(); let r = ag(fs); let p = aroot + "/x/transcript.jsonl"
+        push(r, fs, p, rec("USER_INPUT", source: "USER_EXPLICIT") + st("DONE"), at: t0)
+        XCTAssertEqual(r.status(now: t0 + 599).phase, .working)
+        XCTAssertEqual(r.status(now: t0 + 600).phase, .idle)
+        let f2 = MemFS(); let r2 = ag(f2)
+        push(r2, f2, p, st("DONE"), at: t0)
+        push(r2, f2, p, rec("GENERIC"), at: t0 + 599)
+        XCTAssertEqual(r2.status(now: t0 + 599 + 599).phase, .working)
+        push(r2, f2, p, "{bad json\n", at: t0 + 1198)
+        XCTAssertEqual(r2.status(now: t0 + 1198 + 599).phase, .working)
+        XCTAssertEqual(r2.status(now: t0 + 1198 + 600).phase, .idle)
+        let huge = "{\"type\":\"PLANNER_RESPONSE\",\"source\":\"MODEL\",\"x\":\"" + String(repeating: "a", count: 70_000) + "\"}\n"
+        let f3 = MemFS(); let r3 = ag(f3)
+        push(r3, f3, p, huge, at: t0)
+        XCTAssertEqual(r3.status(now: t0).phase, .working)
+    }
+
+    // 0.4.1 §D10：Codex 启动后新出现的文件从头读
+    func testV041CodexNewFileFromStart() {
+        let fs = MemFS(); let r = codex(fs); let p = dayDir(t0) + "/rollout-new.jsonl"
+        fs.mkdir(dayDir(t0)); r.start(now: t0)
+        let meta = "{\"timestamp\":\"2026-11-27T08:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"x\",\"base\":\"" + String(repeating: "m", count: 28_000) + "\"}}\n"
+        fs.write(p, meta + ev("task_started"), mtime: t0 + 1)
+        let big = "{\"timestamp\":\"2026-11-27T08:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"x\":\"" + String(repeating: "r", count: 70_000) + "\"}}\n"
+        fs.append(p, big + String(repeating: ev("token_count"), count: 500), mtime: t0 + 5)
+        XCTAssertGreaterThan(fs.files[p]!.data.count, 28_000 + 110_000)
+        // FSEvents 合并成一次：第二次写入之后才第一次读
+        while r.fileChanged(p, now: t0 + 5) {}
+        XCTAssertEqual(r.status(now: t0 + 5).phase, .working)
+        XCTAssertLessThanOrEqual(fs.maxRead, 1024 * 1024)
+        // 分两次通知也一样，不因第二次写入丢失
+        let f2 = MemFS(); let r2 = codex(f2)
+        f2.mkdir(dayDir(t0)); r2.start(now: t0)
+        push(r2, f2, p, meta + ev("task_started"), at: t0 + 1)
+        XCTAssertEqual(r2.status(now: t0 + 1).phase, .working)
+        push(r2, f2, p, big + String(repeating: ev("token_count"), count: 500), at: t0 + 5)
+        XCTAssertEqual(r2.status(now: t0 + 5).phase, .working)
+    }
+
+    // 0.4.1 §D11：启动时已存在的文件仍只读末尾 64KB
+    func testV041CodexExistingFileTailOnly() {
+        let fs = MemFS(); let p = dayDir(t0) + "/rollout-old.jsonl"
+        let meta = "{\"type\":\"session_meta\",\"payload\":{\"x\":\"" + String(repeating: "m", count: 28_000) + "\"}}\n"
+        fs.write(p, meta + ev("task_started") + String(repeating: ev("token_count"), count: 1500), mtime: t0 - 5)
+        let r = codex(fs); r.start(now: t0)
+        XCTAssertLessThanOrEqual(fs.maxRead, 64 * 1024)
+        XCTAssertEqual(r.status(now: t0).phase, .idle) // task_started 不在末尾 64KB 里
+        // 启动前就有、启动时没打开的文件之后变了：仍只读末尾
+        let f2 = MemFS(); let q = dayDir(t0 - 3 * 86400) + "/rollout-older.jsonl"
+        f2.write(q, meta + ev("task_started") + String(repeating: ev("token_count"), count: 1500), mtime: t0 - 3 * 86400)
+        let r2 = codex(f2); r2.start(now: t0)
+        f2.append(q, ev("token_count"), mtime: t0 + 1)
+        r2.fileChanged(q, now: t0 + 1)
+        XCTAssertLessThanOrEqual(f2.maxRead, 64 * 1024)
     }
 
     // A3
@@ -341,7 +495,7 @@ final class AgentStatusTests: XCTestCase {
         fa.write(aroot + "/s1/transcript.jsonl", st("RUNNING"), mtime: now - 30)
         fa.write(aroot + "/s2/.system_generated/logs/transcript.jsonl", st("RUNNING"), mtime: now - 30)
         fa.write(aroot + "/s3/transcript.jsonl", st("RUNNING"), mtime: now - 3600)
-        fa.write(aroot + "/s4/transcript.jsonl", st("RUNNING") + st("DONE"), mtime: now - 30)
+        fa.write(aroot + "/s4/transcript.jsonl", st("RUNNING") + fin, mtime: now - 30)
         let a = ag(fa)
         a.start(now: now)
         XCTAssertEqual(fa.listed, [aroot])
@@ -363,7 +517,7 @@ final class AgentStatusTests: XCTestCase {
         XCTAssertEqual(r.status(now: t0).phase, .done)
         let fa = MemFS(); let a = ag(fa); a.keepsEventLog = true
         push(a, fa, aroot + "/FIXTURE_SESSION_ID_123/transcript.jsonl", g, at: t0)
-        XCTAssertEqual(a.eventLog, ["RUNNING", "DONE"])
+        XCTAssertEqual(a.eventLog, ["activity", "final", "final", "activity"])
         for reader in [r, a] {
             let dump = String(describing: reader.sessions) + String(describing: reader.cursors) + reader.eventLog.joined()
                 + String(reflecting: reader.status(now: t0))
@@ -384,8 +538,10 @@ final class AgentStatusTests: XCTestCase {
         XCTAssertEqual(AgentLineParser.codex(Data(ask("z").dropLast().utf8), pending: [])?.event, .askStart(callID: "z"))
         XCTAssertNil(AgentLineParser.codex(Data(out("z").dropLast().utf8), pending: []))
         XCTAssertEqual(AgentLineParser.codex(Data(out("z").dropLast().utf8), pending: ["z"])?.event, .askOutput(callID: "z"))
-        XCTAssertEqual(AgentLineParser.antigravity(Data(st("RUNNING").utf8)), .running)
-        XCTAssertNil(AgentLineParser.antigravity(Data("{\"type\":\"RUNNING\"}".utf8)))
+        XCTAssertEqual(AgentLineParser.antigravity(Data(st("RUNNING").utf8)), .activity)
+        XCTAssertEqual(AgentLineParser.antigravity(Data(fin.utf8)), .turnEnd)
+        XCTAssertNil(AgentLineParser.antigravity(Data("{\"status\":\"RUNNING\"}".utf8)))
+        XCTAssertNil(AgentLineParser.antigravity(Data("{bad".utf8)))
     }
 
     func testDebugSnapshotParse() {

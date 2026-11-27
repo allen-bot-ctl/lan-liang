@@ -443,9 +443,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         func codex(_ type: String, _ payload: String) -> String {
             "{\"timestamp\":\"\(iso.string(from: Date()))\",\"type\":\"\(type)\",\"payload\":\(payload)}"
         }
-        func ag(_ status: String) -> String {
-            "{\"type\":\"PLANNER_RESPONSE\",\"status\":\"\(status)\",\"source\":\"MODEL\",\"created_at\":\"\(iso.string(from: Date()))\",\"step_index\":1,\"content\":\"DEBUG_SECRET_MARKER\"}"
+        /// 0.4.1：Antigravity 一行记录；tools = nil 不写 tool_calls（最终回复）。
+        func ag(_ type: String, source: String = "MODEL", status: String = "DONE", tools: Bool = false) -> String {
+            "{\"type\":\"\(type)\",\"status\":\"\(status)\",\"source\":\"\(source)\",\"created_at\":\"\(iso.string(from: Date()))\",\"step_index\":1" +
+                (tools ? ",\"tool_calls\":[{\"name\":\"DEBUG_SECRET_MARKER\"}]" : "") + ",\"content\":\"DEBUG_SECRET_MARKER\"}"
         }
+        // 契约 0.4.1 §C：真实序列 fixture（老板 Mac step 20–49，只有字段名）；CI 用 --debug-agent-fixture 传路径。
+        let real: [(step: Int, line: String)] = (argValue("debug-agent-fixture")
+            .flatMap { try? String(contentsOfFile: $0, encoding: .utf8) } ?? "")
+            .split(separator: "\n").compactMap { l in
+                guard let o = (try? JSONSerialization.jsonObject(with: Data(l.utf8))) as? [String: Any],
+                      let step = o["step_index"] as? Int else { return nil }
+                return (step, String(l))
+            }
+        guard real.count >= 30 else {
+            print("DEBUG_AGENT_STATUS failed: no fixture"); fflush(stdout); exit(1)
+        }
+        func realSteps(_ r: ClosedRange<Int>) { for x in real where r.contains(x.step) { self.appendLine(x.line, to: files.antigravity) } }
         typealias Expect = (AgentPhase, AgentPhase)
         struct Step { let name: String; let write: () -> Void; let expect: Expect; let settle: Bool }
         let cf = files.codex, af = files.antigravity
@@ -466,10 +480,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Step(name: "turn_aborted", write: {
                 self.appendLine(codex("event_msg", "{\"type\":\"turn_aborted\"}"), to: cf)
             }, expect: (.failed, .idle), settle: false),
-            Step(name: "RUNNING", write: { self.appendLine(ag("RUNNING"), to: af) }, expect: (.failed, .working), settle: false),
-            Step(name: "DONE_debounce", write: { self.appendLine(ag("DONE"), to: af) }, expect: (.failed, .working), settle: true),
-            Step(name: "DONE", write: {}, expect: (.failed, .done), settle: false),
-            Step(name: "ERROR", write: { self.appendLine(ag("ERROR"), to: af) }, expect: (.failed, .failed), settle: false),
+            Step(name: "ag_step20_31", write: { realSteps(20...31) }, expect: (.failed, .working), settle: true),
+            Step(name: "ag_step32_final", write: { realSteps(32...32) }, expect: (.failed, .done), settle: false),
+            Step(name: "ag_step33_user_input", write: { realSteps(33...33) }, expect: (.failed, .working), settle: false),
+            Step(name: "ag_step34_49", write: { realSteps(34...49) }, expect: (.failed, .working), settle: true),
+            Step(name: "ag_final", write: { self.appendLine(ag("PLANNER_RESPONSE"), to: af) }, expect: (.failed, .done), settle: false),
+            Step(name: "ag_system_message", write: { self.appendLine(ag("SYSTEM_MESSAGE", source: "SYSTEM"), to: af) }, expect: (.failed, .working), settle: false),
+            Step(name: "ag_error_message", write: { self.appendLine(ag("ERROR_MESSAGE", source: "SYSTEM"), to: af) }, expect: (.failed, .failed), settle: false),
             Step(name: "bad_lines", write: {
                 self.appendLine("{not json", to: cf)
                 self.appendLine("\"just a string\"", to: af)
@@ -478,8 +495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Step(name: "unknown", write: {
                 self.appendLine(codex("event_msg", "{\"type\":\"some_future_event\"}"), to: cf)
                 self.appendLine(codex("response_item", "{\"type\":\"function_call\",\"name\":\"shell\",\"call_id\":\"call_x\"}"), to: cf)
-                self.appendLine(ag("USER_INPUT"), to: af)
-                self.appendLine(ag("SOMETHING_NEW"), to: af)
+                self.appendLine("{\"status\":\"SOMETHING_NEW\",\"source\":\"MODEL\"}", to: af)
             }, expect: (.failed, .failed), settle: true),
         ]
         var seq: [String] = []
@@ -493,6 +509,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let widths = widthsAfterFirst < 0 ? -1 : menuBarWidthWrites - widthsAfterFirst
             print("DEBUG_AGENT_STATUS \(good ? "ok" : "failed") \(why) seq=\(seq.joined(separator: ",")) blink=\(blink) widths=\(widths) events=\(log.joined(separator: ",")) reduceMotion=\(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)")
             fflush(stdout)
+            // 契约 0.4.1 §C：打印结果后自己退出，ok = 0，failed = 1。
+            exit(good ? 0 : 1)
         }
         func run(_ i: Int) {
             guard i < steps.count else {

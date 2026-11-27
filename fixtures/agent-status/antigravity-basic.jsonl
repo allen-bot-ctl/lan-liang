@@ -1,3 +1,4 @@
 {"type":"USER_INPUT","status":"USER_INPUT","source":"USER","created_at":"2026-11-27T08:00:00Z","step_index":0,"content":"FIXTURE_MARKER_BODY"}
 {"type":"PLANNER_RESPONSE","status":"RUNNING","source":"MODEL","created_at":"2026-11-27T08:00:01Z","step_index":1}
 {"type":"PLANNER_RESPONSE","status":"DONE","source":"MODEL","created_at":"2026-11-27T08:00:02Z","step_index":1,"content":"FIXTURE_MARKER_BODY"}
+{"type":"PLANNER_RESPONSE","status":"DONE","source":"MODEL","created_at":"2026-11-27T08:00:03Z","step_index":2,"model":"FIXTURE_MARKER_BODY","tool_calls":[{"name":"FIXTURE_MARKER_BODY","args":"FIXTURE_MARKER_BODY"}]}

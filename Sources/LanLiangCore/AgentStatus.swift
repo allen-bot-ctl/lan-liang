@@ -1,6 +1,6 @@
 import Foundation
 
-// 0.4.0 AI 会话状态（契约 docs/changes/0.4.0.md）。纯逻辑：解析状态行、单会话状态机、读文件游标、归并。
+// 0.4.0 AI 会话状态（契约 docs/changes/0.4.0.md；0.4.1 改 Antigravity 判断和 Codex 新文件从头读）。纯逻辑：解析状态行、单会话状态机、读文件游标、归并。
 // 只取事件类型、call_id 和时间；不保存、不打印任何行内容，内存里不存文件路径（会话用相对路径的哈希做键）。
 
 public enum AgentTool: String, CaseIterable, Sendable {
@@ -112,7 +112,8 @@ public enum AgentDotStyle {
 public enum AgentEvent: Equatable, Sendable {
     case taskStarted, taskComplete, turnAborted
     case askStart(callID: String), askOutput(callID: String)
-    case running, done, error
+    /// Antigravity：用户输入或任何一条 MODEL/SYSTEM 新记录 = 工作中；turnEnd = 不带 tool_calls 的 PLANNER_RESPONSE 或 CHECKPOINT。
+    case activity, turnEnd, error
 
     public var debugName: String {
         switch self {
@@ -121,8 +122,8 @@ public enum AgentEvent: Equatable, Sendable {
         case .turnAborted: return "turn_aborted"
         case .askStart: return "ask_start"
         case .askOutput: return "ask_output"
-        case .running: return "RUNNING"
-        case .done: return "DONE"
+        case .activity: return "activity"
+        case .turnEnd: return "final"
         case .error: return "ERROR"
         }
     }
@@ -137,7 +138,6 @@ public enum AgentLineParser {
     private static let kEventMsg = Data("\"event_msg\"".utf8)
     private static let kFunctionCall = Data("\"function_call\"".utf8)
     private static let kFunctionCallOutput = Data("\"function_call_output\"".utf8)
-    private static let kStatus = Data("\"status\"".utf8)
 
     private static let isoFrac: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
@@ -194,17 +194,29 @@ public enum AgentLineParser {
         return nil
     }
 
-    /// Antigravity transcript.jsonl 一行：只取顶层 status。
-    public static func antigravity<D: DataProtocol>(_ raw: D) -> AgentEvent? {
+    /// Antigravity transcript.jsonl 一行（契约 0.4.1 §A1/§A2）：只取顶层 type、status、source、created_at，
+    /// tool_calls 只看键在不在、是不是空，不取里面的内容。超过 64KB 的行不解析，按工作中算。
+    public static func antigravity<D: DataProtocol>(_ raw: D) -> AgentEvent? { antigravityLine(raw)?.event }
+
+    public static func antigravityLine<D: DataProtocol>(_ raw: D) -> (event: AgentEvent, time: Date?)? {
         let line = Data(raw)
-        guard line.count <= maxLineBytes, line.range(of: kStatus) != nil,
-              let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
-              let status = obj["status"] as? String else { return nil }
-        switch status {
-        case "RUNNING": return .running
-        case "DONE": return .done
-        case "ERROR": return .error
-        default: return nil
+        guard !line.isEmpty else { return nil }
+        if line.count > maxLineBytes { return (.activity, nil) }
+        guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+              let type = obj["type"] as? String else { return nil }
+        let time = date(obj["created_at"])
+        if type == "ERROR_MESSAGE" || (obj["status"] as? String) == "ERROR" { return (.error, time) }
+        if type == "CHECKPOINT" || (type == "PLANNER_RESPONSE" && !hasToolCalls(obj["tool_calls"])) { return (.turnEnd, time) }
+        return (.activity, time)
+    }
+
+    static func hasToolCalls(_ v: Any?) -> Bool {
+        guard let v = v else { return false }
+        switch v {
+        case is NSNull: return false
+        case let a as [Any]: return !a.isEmpty
+        case let d as [String: Any]: return !d.isEmpty
+        default: return true
         }
     }
 }
@@ -215,14 +227,12 @@ public struct AgentSession: Equatable, Sendable {
     public static let workingTimeout: TimeInterval = 10 * 60
     public static let askingTimeout: TimeInterval = 30 * 60
     public static let fadeAfter: TimeInterval = 60
-    public static let doneDebounce: TimeInterval = 5
 
     public private(set) var phase: AgentPhase = .idle
     public private(set) var since: Date?
     var askedAt: Date?
     var phaseAt: Date?
     var lastLineAt: Date?
-    var doneCandidateAt: Date?
     public private(set) var pending: Set<String> = []
 
     public init() {}
@@ -230,11 +240,11 @@ public struct AgentSession: Equatable, Sendable {
     /// 文件追加了任何一行（不必认识）：工作中重新按 10 分钟计时。
     public mutating func noteLine(at now: Date) { lastLineAt = now }
 
-    public mutating func apply(_ e: AgentEvent, at now: Date) {
+    /// startedAt：进入工作中时用作起点（Antigravity 用这一行的 created_at，取不到用 now）。
+    public mutating func apply(_ e: AgentEvent, at now: Date, startedAt: Date? = nil) {
         switch e {
-        case .taskStarted, .running:
+        case .taskStarted:
             pending = []
-            doneCandidateAt = nil
             if !(phase == .working || phase == .asking) || since == nil { since = now }
             phase = .working
             lastLineAt = max(lastLineAt ?? now, now)
@@ -242,26 +252,29 @@ public struct AgentSession: Equatable, Sendable {
             finish(.done, at: now)
         case .turnAborted, .error:
             finish(.failed, at: now)
+        case .turnEnd:
+            // 契约 0.4.1 §A2：结束记录立即刚完成，不等待、不去抖。
+            finish(.done, at: now)
         case .askStart(let id):
             pending.insert(id)
             if since == nil || !(phase == .working || phase == .asking) { since = now }
             phase = .asking
             askedAt = now
-            doneCandidateAt = nil
         case .askOutput(let id):
             guard pending.remove(id) != nil else { return }
             if pending.isEmpty, phase == .asking {
                 phase = .working
                 lastLineAt = max(lastLineAt ?? now, now)
             }
-        case .done:
-            if phase == .working { doneCandidateAt = now } else { finish(.done, at: now) }
+        case .activity:
+            if phase != .working || since == nil { since = min(startedAt ?? now, now) }
+            phase = .working
+            lastLineAt = max(lastLineAt ?? now, now)
         }
     }
 
     private mutating func finish(_ p: AgentPhase, at now: Date) {
         pending = []
-        doneCandidateAt = nil
         askedAt = nil
         since = nil
         phase = p
@@ -269,17 +282,14 @@ public struct AgentSession: Equatable, Sendable {
     }
 
     private mutating func toIdle() {
-        pending = []; doneCandidateAt = nil; askedAt = nil; since = nil; phaseAt = nil; phase = .idle
+        pending = []; askedAt = nil; since = nil; phaseAt = nil; phase = .idle
     }
 
-    /// 处理到点：DONE 去抖、10 分钟、30 分钟兜底、60 秒淡出。
+    /// 处理到点：10 分钟、30 分钟兜底、60 秒淡出。
     public mutating func advance(to now: Date) {
-        if let c = doneCandidateAt, now >= c + Self.doneDebounce {
-            finish(.done, at: c + Self.doneDebounce)
-        }
         switch phase {
         case .working:
-            if doneCandidateAt == nil, let l = lastLineAt, now >= l + Self.workingTimeout { toIdle() }
+            if let l = lastLineAt, now >= l + Self.workingTimeout { toIdle() }
         case .asking:
             if let a = askedAt, now >= a + Self.askingTimeout { toIdle() }
         case .done, .failed:
@@ -290,7 +300,6 @@ public struct AgentSession: Equatable, Sendable {
     }
 
     public var deadline: Date? {
-        if let c = doneCandidateAt { return c + Self.doneDebounce }
         switch phase {
         case .working: return lastLineAt.map { $0 + Self.workingTimeout }
         case .asking: return askedAt.map { $0 + Self.askingTimeout }
@@ -299,11 +308,15 @@ public struct AgentSession: Equatable, Sendable {
         }
     }
 
-    /// 启动恢复（契约 §1.3）：只留工作中（mtime 10 分钟内）和未结束的提问（提问 30 分钟内）。
-    mutating func keepOnlyRestorable(mtime: Date, now: Date) {
+    /// 启动恢复（契约 0.4.0 §1.3、0.4.1 §A3）：只留工作中（mtime 10 分钟内）和未结束的提问（提问 30 分钟内）；
+    /// keepsDone（Antigravity）：最后一行是结束记录、mtime 60 秒内 → 刚完成，按 mtime 起算淡出。出错不补显示。
+    mutating func keepOnlyRestorable(mtime: Date, now: Date, keepsDone: Bool = false) {
         switch phase {
-        case .working where doneCandidateAt == nil && now.timeIntervalSince(mtime) <= Self.workingTimeout:
+        case .working where now.timeIntervalSince(mtime) <= Self.workingTimeout:
+            // 一轮中途启动：末尾任何一条工作中的记录就能认出来（Antigravity 恢复时每行按 mtime 记，时长从 mtime 算起）。
             lastLineAt = mtime
+        case .done where keepsDone && now.timeIntervalSince(mtime) < Self.fadeAfter:
+            phaseAt = mtime
         case .asking where (askedAt.map({ now.timeIntervalSince($0) < Self.askingTimeout }) ?? false):
             break
         default:
@@ -318,7 +331,11 @@ public struct AgentFileInfo: Equatable, Sendable {
     public var size: UInt64
     public var mtime: Date
     public var isDirectory: Bool
-    public init(size: UInt64, mtime: Date, isDirectory: Bool) { self.size = size; self.mtime = mtime; self.isDirectory = isDirectory }
+    /// 文件创建时间（拿不到为 nil）：用来分辨栏量启动后才出现的 Codex 会话文件。
+    public var created: Date?
+    public init(size: UInt64, mtime: Date, isDirectory: Bool, created: Date? = nil) {
+        self.size = size; self.mtime = mtime; self.isDirectory = isDirectory; self.created = created
+    }
 }
 
 public protocol AgentFileSystem {
@@ -334,7 +351,8 @@ public struct LocalAgentFileSystem: AgentFileSystem {
         guard let a = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
         let size = (a[.size] as? NSNumber)?.uint64Value ?? 0
         let mtime = (a[.modificationDate] as? Date) ?? .distantPast
-        return AgentFileInfo(size: size, mtime: mtime, isDirectory: (a[.type] as? FileAttributeType) == .typeDirectory)
+        return AgentFileInfo(size: size, mtime: mtime, isDirectory: (a[.type] as? FileAttributeType) == .typeDirectory,
+                             created: a[.creationDate] as? Date)
     }
     public func read(_ path: String, offset: UInt64, length: Int) -> Data? {
         guard length > 0, let h = FileHandle(forReadingAtPath: path) else { return nil }
@@ -363,6 +381,8 @@ public final class AgentSessionReader {
     /// 调试 / 单测：处理过的事件名（只有事件名）。
     public private(set) var eventLog: [String] = []
     public var keepsEventLog = false
+    /// start 的时间；之后才创建的 Codex 会话文件从头读（0.4.1）。
+    private(set) var startedAt: Date?
 
     public init(tool: AgentTool, root: String, fs: AgentFileSystem = LocalAgentFileSystem(), calendar: Calendar = .current) {
         self.tool = tool
@@ -390,6 +410,7 @@ public final class AgentSessionReader {
 
     /// 启动：不扫历史（契约 §1.3）。
     public func start(now: Date) {
+        startedAt = now
         for path in startupCandidates(now: now) {
             guard let info = fs.info(path), !info.isDirectory else { continue }
             let age = now.timeIntervalSince(info.mtime)
@@ -447,7 +468,7 @@ public final class AgentSessionReader {
             offset = start + UInt64(data.count - lines.remainder)
             if lines.remainder > AgentLineParser.maxLineBytes { offset = start + UInt64(data.count); skipping = true }
         }
-        session.keepOnlyRestorable(mtime: info.mtime, now: now)
+        session.keepOnlyRestorable(mtime: info.mtime, now: now, keepsDone: tool == .antigravity)
         sessions[k] = session
         cursors[k] = Cursor(offset: offset, skipping: skipping)
     }
@@ -461,8 +482,11 @@ public final class AgentSessionReader {
         guard !info.isDirectory else { return false }
         guard var cur = cursors[k], info.size >= cur.offset else {
             // 新文件或变小（截断 / 替换）：从头读，超过 64KB 只读末尾 64KB。
+            // 例外（0.4.1）：栏量启动后才创建的 Codex 会话文件整份从头读（每次最多 1MB，只解析状态事件），
+            // 桌面版新会话开头的 session_meta 很大，只读末尾会漏掉 task_started。
+            let fresh = tool == .codex && cursors[k] == nil && isCreatedAfterStart(info)
             sessions[k] = nil; cursors[k] = nil
-            if info.size > UInt64(Self.tailBytes) {
+            if info.size > UInt64(Self.tailBytes) && !fresh {
                 restore(path, info: info, now: now)
                 return false
             }
@@ -492,6 +516,7 @@ public final class AgentSessionReader {
                 if tool == .codex, let r = AgentLineParser.codexLong(Data(data.suffix(lines.remainder)), pending: session.pending) {
                     apply(r.event, session: &session, at: now)
                 }
+                if tool == .antigravity { apply(.activity, session: &session, at: now) }  // 超长的新记录也算工作中
             }
             cur.skipping = true
             cur.offset += UInt64(data.count)
@@ -505,6 +530,11 @@ public final class AgentSessionReader {
         return len == Self.chunkBytes && cur.offset > before && cur.offset < info.size
     }
 
+    func isCreatedAfterStart(_ info: AgentFileInfo) -> Bool {
+        guard let s = startedAt, let c = info.created else { return false }
+        return c >= s
+    }
+
     public func fileRemoved(_ path: String) { remove(key(path)) }
     private func remove(_ k: Int) { sessions[k] = nil; cursors[k] = nil }
 
@@ -516,13 +546,13 @@ public final class AgentSessionReader {
             guard let r = AgentLineParser.codex(line, pending: session.pending) else { return }
             apply(r.event, session: &session, at: restoring ? (r.time ?? now) : now)
         case .antigravity:
-            guard let e = AgentLineParser.antigravity(line) else { return }
-            apply(e, session: &session, at: now)
+            guard let r = AgentLineParser.antigravityLine(line) else { return }
+            apply(r.event, session: &session, at: now, startedAt: restoring ? nil : r.time)
         }
     }
 
-    private func apply(_ e: AgentEvent, session: inout AgentSession, at t: Date) {
-        session.apply(e, at: t)
+    private func apply(_ e: AgentEvent, session: inout AgentSession, at t: Date, startedAt: Date? = nil) {
+        session.apply(e, at: t, startedAt: startedAt)
         if keepsEventLog { eventLog.append(e.debugName) }
     }
 
