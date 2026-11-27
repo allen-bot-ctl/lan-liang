@@ -61,7 +61,7 @@ CASES=(
   "normal codex daily" "normal codex weekly" "normal codex monthly" "normal gemini"
   "codex-5h codex daily" "low codex daily" "low gemini" "max codex daily"
   "sub-rolled codex daily" "sub-lt1day codex daily" "sub-expired codex daily" "official-failed codex daily"
-  "failed codex daily" "failed gemini" "expired codex daily" "expired gemini" "keychain-denied gemini"
+  "failed codex daily" "failed gemini" "expired codex daily" "expired gemini" "keychain-unavailable gemini"
   "both-weekly codex daily" "codex-only codex daily" "gemini-only gemini" "none codex daily"
   "normal gemini weekly" "gemini-partial gemini daily" "gemini-empty gemini daily" "gemini-none gemini daily"
 )
@@ -213,7 +213,7 @@ chk none-codex-daily 'fallback' 0
 chk codex-5h-codex-daily 'codex:77%+36,gemini:44%+64' 2
 chk max-codex-daily 'codex:100%+100,gemini:100%+100' 2
 chk expired-codex-daily 'codex:--,gemini:--' 2
-chk keychain-denied-gemini 'codex:77%' 1
+chk keychain-unavailable-gemini 'codex:77%,gemini:--' 2
 chk low-codex-daily 'codex:8%+25,gemini:25%+64' 2
 chk failed-gemini 'codex:77%,gemini:--' 2
 # 0.3.0：只开一个服务 → 单行放大；两个都开 → 和 0.2.2 一样两行。
