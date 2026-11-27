@@ -215,6 +215,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.debugHistoryLifecycle() }
         } else if args.contains("--debug-hover-lifecycle") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugHoverLifecycle() }
+        } else if args.contains("--debug-esc-back-to-main") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugEscBackToMain() }
         } else if args.contains("--debug-esc-lifecycle") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugEscLifecycle() }
         } else if args.contains("--debug-settings-roundtrip") {
@@ -644,17 +646,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// 合成一次 Esc 按键送进面板（CI 用），走和真实按键一样的 FloatingPanel.sendEvent / cancelOperation。
+    private func debugSendEscape(_ p: NSPanel, _ flags: NSEvent.ModifierFlags = []) {
+        if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: p.windowNumber,
+                                    context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                                    isARepeat: false, keyCode: PanelEscape.escapeKeyCode) {
+            p.sendEvent(e)
+        }
+    }
+
+    /// CI 截图（契约 0.3.15 验收 2）：进设置页后按 Esc，回到主页再打印截图区域；状态不对就不打印区域，截图脚本会失败。
+    private func debugEscBackToMain() {
+        openSettings()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            guard let p = self.panel, p.isVisible, self.model.showsSettings else {
+                print("DEBUG_ESC_BACK failed: settings page not open"); fflush(stdout); return
+            }
+            self.debugSendEscape(p)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                let main = !self.model.showsSettings
+                print("DEBUG_ESC_BACK page=\(main ? "main" : "settings") visible=\(p.isVisible ? 1 : 0)")
+                if main && p.isVisible { self.printRects() }
+                fflush(stdout)
+            }
+        }
+    }
+
     /// CI（契约 0.3.15）：悬停预览不抢焦点；点图标固定、进设置、⌘Esc 不处理、Esc 回主页、Esc 收起、再点图标停在主页。
     /// Esc 用合成的按键事件送进面板，走和真实按键一样的 FloatingPanel.sendEvent / cancelOperation。
     private func debugEscLifecycle() {
-        func key(_ p: NSPanel, _ flags: NSEvent.ModifierFlags = []) {
-            if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
-                                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: p.windowNumber,
-                                        context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
-                                        isARepeat: false, keyCode: PanelEscape.escapeKeyCode) {
-                p.sendEvent(e)
-            }
-        }
+        func key(_ p: NSPanel, _ flags: NSEvent.ModifierFlags = []) { debugSendEscape(p, flags) }
         func after(_ body: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: body) }
         hover.enterItem()
         if hover.mode == .preview { openMenuPanel(from: statusItem.button) }

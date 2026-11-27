@@ -81,6 +81,15 @@ CASES=(
   "both-weekly codex daily" "codex-only codex daily" "gemini-only gemini" "none codex daily"
   "normal gemini weekly" "gemini-partial gemini daily" "gemini-empty gemini daily" "gemini-none gemini daily"
 )
+# 0.3.15（契约 0.3.15 验收 2，PM 01:16）：设置页按 Esc 回到主页后的面板，深浅两套。
+# 应用先核对 page=main visible=1 才打印截图区域；这里再核对一次日志。
+for ap in dark light; do
+  if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
+  LANLIANG_FAKE="$PWD/fixtures/normal.json" shoot "-esc-back-to-main-$ap" --debug-esc-back-to-main --debug-appearance=$ap
+  grep -q '^DEBUG_ESC_BACK page=main visible=1$' "/tmp/shots--esc-back-to-main-$ap.log" \
+    || { echo "::error::esc-back-to-main-$ap 截图前不是主页: $(grep '^DEBUG_ESC_BACK' "/tmp/shots--esc-back-to-main-$ap.log" || echo 没有输出)"; exit 1; }
+  echo "RELEASE: esc-back-to-main-$ap $(grep '^DEBUG_ESC_BACK' "/tmp/shots--esc-back-to-main-$ap.log")"
+done
 for ap in dark light; do
   if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
   for c in "${CASES[@]}"; do
