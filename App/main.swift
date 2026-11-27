@@ -8,8 +8,43 @@ import Sparkle
 #endif
 
 /// 无边框浮层面板：悬停预览、点按固定，点别处关闭。
+/// Esc（契约 0.3.15）只在面板自己收到时处理，不用全局或本地键盘监听：设置页回主页，主页收起。
 final class FloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
+
+    /// 由 AppDelegate 接上：当前是不是设置页，以及执行分层判断的结果。
+    var showsSettings: () -> Bool = { false }
+    var onEscape: (PanelEscape.Action) -> Void = { _ in }
+
+    static func modifiers(_ flags: NSEvent.ModifierFlags) -> PanelEscape.Modifiers {
+        var m: PanelEscape.Modifiers = []
+        if flags.contains(.command) { m.insert(.command) }
+        if flags.contains(.option) { m.insert(.option) }
+        if flags.contains(.control) { m.insert(.control) }
+        if flags.contains(.shift) { m.insert(.shift) }
+        return m
+    }
+
+    /// 处理了返回 true；带修饰键的 Esc 或别的键不处理。
+    @discardableResult
+    func handleEscape(_ event: NSEvent?) -> Bool {
+        guard let e = event, e.type == .keyDown else { return false }
+        let action = PanelEscape.action(keyCode: e.keyCode, modifiers: Self.modifiers(e.modifierFlags),
+                                        showsSettings: showsSettings())
+        guard action != .ignore else { return false }
+        onEscape(action)
+        return true
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if !handleEscape(NSApp.currentEvent) { super.cancelOperation(sender) }
+    }
+
+    /// SwiftUI 内容不一定把 Esc 翻译成 cancelOperation；面板自己收到的 Esc 在这里走同一条判断。
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, event.keyCode == PanelEscape.escapeKeyCode, handleEscape(event) { return }
+        super.sendEvent(event)
+    }
 }
 
 /// 带兜底的退出：先正常 terminate，3 秒还没退就强退。
@@ -180,6 +215,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.debugHistoryLifecycle() }
         } else if args.contains("--debug-hover-lifecycle") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugHoverLifecycle() }
+        } else if args.contains("--debug-esc-lifecycle") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugEscLifecycle() }
         } else if args.contains("--debug-settings-roundtrip") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.debugSettingsRoundTrip() }
         } else if args.contains("--debug-open-settings") {
@@ -300,15 +337,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             hover.endMenu()
             return
         }
+        clickPin(from: sender)
+    }
+
+    /// 点图标：固定或收起。固定时面板成为键盘焦点，Esc 直接生效；悬停预览不抢焦点。
+    private func clickPin(from sender: NSButton?) {
         cancelHoverClose()
         hover.click()
         if hover.mode == .hidden { hidePanel() }
         else {
             openMenuPanel(from: sender)
             if hover.mode == .pinned, panel?.isVisible == true {
+                panel?.makeKey()
                 requestGeminiHistory()
                 refresh()
             }
+        }
+    }
+
+    private func panelEscape(_ action: PanelEscape.Action) {
+        switch action {
+        case .returnToMain: model.returnToDashboard()
+        case .closePanel: hidePanel()
+        case .ignore: break
         }
     }
 
@@ -403,6 +454,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fx.addSubview(h)
         if hoverEnabled { panelHoverTracking.attach(to: fx) }
         p.contentView = fx
+        p.showsSettings = { [weak self] in self?.model.showsSettings ?? false }
+        p.onEscape = { [weak self] action in self?.panelEscape(action) }
         host = h
         panel = p
     }
@@ -586,6 +639,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let ok = startup == 0 && automatic == 0 && foreground == 1 && hidden == 1 && preview && pinned
                     print("DEBUG_HISTORY_LIFECYCLE \(ok ? "ok" : "failed") startup=\(startup) automatic=\(automatic) foreground=\(foreground) hidden=\(hidden) preview=\(preview) pinned=\(pinned)")
                     fflush(stdout)
+                }
+            }
+        }
+    }
+
+    /// CI（契约 0.3.15）：悬停预览不抢焦点；点图标固定、进设置、⌘Esc 不处理、Esc 回主页、Esc 收起、再点图标停在主页。
+    /// Esc 用合成的按键事件送进面板，走和真实按键一样的 FloatingPanel.sendEvent / cancelOperation。
+    private func debugEscLifecycle() {
+        func key(_ p: NSPanel, _ flags: NSEvent.ModifierFlags = []) {
+            if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: p.windowNumber,
+                                        context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                                        isARepeat: false, keyCode: PanelEscape.escapeKeyCode) {
+                p.sendEvent(e)
+            }
+        }
+        func after(_ body: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: body) }
+        hover.enterItem()
+        if hover.mode == .preview { openMenuPanel(from: statusItem.button) }
+        after {
+            let previewNoKey = self.panel?.isVisible == true && self.hover.mode == .preview && self.panel?.isKeyWindow == false
+            self.clickPin(from: self.statusItem.button)
+            after {
+                guard let p = self.panel else { print("DEBUG_ESC_LIFECYCLE failed: no panel"); fflush(stdout); return }
+                let pinned = p.isVisible && self.hover.mode == .pinned && !self.model.showsSettings
+                let pinnedKey = p.isKeyWindow
+                self.model.onOpenSettings()
+                after {
+                    let settings = p.isVisible && self.model.showsSettings
+                    key(p, .command)
+                    let modifierIgnored = p.isVisible && self.model.showsSettings
+                    key(p)
+                    after {
+                        let backToMain = p.isVisible && !self.model.showsSettings
+                        self.printRects()
+                        key(p)
+                        after {
+                            let closed = !p.isVisible && !self.model.panelVisible
+                            self.clickPin(from: self.statusItem.button)
+                            after {
+                                let reopenedMain = p.isVisible && !self.model.showsSettings && self.hover.mode == .pinned
+                                let reopenedKey = p.isKeyWindow
+                                let ok = previewNoKey && pinned && pinnedKey && settings && modifierIgnored
+                                    && backToMain && closed && reopenedMain && reopenedKey
+                                print("DEBUG_ESC_LIFECYCLE \(ok ? "ok" : "failed") previewNoKey=\(previewNoKey) pinned=\(pinned) pinnedKey=\(pinnedKey) settings=\(settings) modifierIgnored=\(modifierIgnored) backToMain=\(backToMain) closed=\(closed) reopenedMain=\(reopenedMain) reopenedKey=\(reopenedKey)")
+                                fflush(stdout)
+                            }
+                        }
+                    }
                 }
             }
         }
