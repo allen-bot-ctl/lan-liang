@@ -6,15 +6,15 @@ body{margin:0;padding:24px;font:13px -apple-system,"PingFang SC",sans-serif;back
 h1{font-size:18px;margin:0 0 4px} p.note{color:#6e6e73;margin:0 0 20px}
 .cols{display:flex;gap:24px;flex-wrap:wrap}
 .scheme{flex:1;min-width:440px;padding:16px;border-radius:12px}
-.light{background:#fff;color:#1d1d1f;--ink:#1d1d1f;--ink2:#6e6e73;--ink3:#aeaeb2;--card:#f5f5f7;--bar:rgba(246,246,246,.92);--blue:#007AFF;--green:#34C759;--red:#FF3B30}
-.dark{background:#1c1c1e;color:#f5f5f7;--ink:#f5f5f7;--ink2:#98989d;--ink3:#636366;--card:#2c2c2e;--bar:rgba(40,40,40,.92);--blue:#0A84FF;--green:#30D158;--red:#FF453A}
+.light{background:#fff;color:#1d1d1f;--ink:#1d1d1f;--ink2:#6e6e73;--ink3:#aeaeb2;--card:#f5f5f7;--bar:rgba(246,246,246,.92);--blue:#007AFF;--green:#34C759;--red:#FF3B30;--orange:#FF9500}
+.dark{background:#1c1c1e;color:#f5f5f7;--ink:#f5f5f7;--ink2:#98989d;--ink3:#636366;--card:#2c2c2e;--bar:rgba(40,40,40,.92);--blue:#0A84FF;--green:#30D158;--red:#FF453A;--orange:#FF9F0A}
 h2{font-size:14px;margin:0 0 10px} h3{font-size:12px;color:var(--ink2);margin:16px 0 6px;font-weight:600}
 .bar{display:inline-flex;align-items:center;height:24px;padding:0 8px;background:var(--bar);border-radius:5px;color:var(--ink);margin:0 10px 8px 0;vertical-align:top}
 .q{display:flex;flex-direction:column;font:600 9.5px/10px ui-monospace,SFMono-Regular,monospace}
 .q span small{font-size:8.5px} .q1{font:500 12px ui-monospace,monospace}
 .dot{width:6px;height:6px;border-radius:50%;margin-left:4px;flex:none}
 .d-working{background:var(--blue);animation:blink 2s steps(1) infinite}
-.d-done{background:var(--green)} .d-err{background:var(--red)}
+.d-done{background:var(--green)} .d-ask{background:var(--orange)} .d-err{background:var(--red)}
 @keyframes blink{0%{opacity:1}50%{opacity:.35}}
 @media (prefers-reduced-motion:reduce){.d-working{animation:none}}
 .lbl{font-size:11px;color:var(--ink2);margin:0 0 2px}
@@ -24,17 +24,18 @@ h2{font-size:14px;margin:0 0 10px} h3{font-size:12px;color:var(--ink2);margin:16
 .row{display:flex;align-items:center;height:22px}
 .row .dot{margin:0 6px 0 0} .row .nodot{width:6px;margin-right:6px}
 .name{width:96px;font-size:13px;color:var(--ink)} .st{flex:1;text-align:right;font-size:12px;font-variant-numeric:tabular-nums}
-.c-blue{color:var(--blue)} .c-green{color:var(--green)} .c-red{color:var(--red)} .c-idle{color:var(--ink3)}
+.c-blue{color:var(--blue)} .c-orange{color:var(--orange)} .c-green{color:var(--green)} .c-red{color:var(--red)} .c-idle{color:var(--ink3)}
 .rest{margin-top:8px;height:54px;border-radius:8px;background:var(--card);opacity:.5;display:flex;align-items:center;justify-content:center;color:var(--ink3);font-size:11px}
 </style></head><body>
 <h1>栏量 0.4.0 样稿：AI 会话状态</h1>
-<p class="note">以契约 docs/changes/0.4.0.md 为准；样稿只示意，不进产品代码。蓝点 2 秒一周期两帧硬切；系统「减少动态效果」时常亮。</p>
+<p class="note">以契约 docs/changes/0.4.0.md 为准；样稿只示意，不进产品代码。蓝点 2 秒一周期两帧硬切，橙点常亮；优先级 问你问题 > 工作中 > 已中断/出错 > 刚完成；系统「减少动态效果」时常亮。</p>
 <div class="cols" id="cols"></div>
 <script>
-const bars=[["工作中","d-working"],["刚完成","d-done"],["已中断 / 出错","d-err"],["空闲","" ]];
+const bars=[["工作中","d-working"],["问你问题（Codex）","d-ask"],["刚完成","d-done"],["已中断 / 出错","d-err"],["空闲","" ]];
 const panels=[
  ["Codex 工作中 + Antigravity 刚完成",[["d-working","工作中 · 12 分钟","c-blue"],["d-done","刚完成","c-green"]]],
  ["Codex 已中断 + Antigravity 出错",[["d-err","已中断","c-red"],["d-err","出错","c-red"]]],
+ ["Codex 问你问题 + Antigravity 工作中（菜单栏为橙点）",[["d-ask","问你问题","c-orange"],["d-working","工作中 · 12 分钟","c-blue"]]],
  ["两个都空闲",[["","空闲","c-idle"],["","空闲","c-idle"]]],
  ["最长文案",[["","空闲","c-idle"],["d-working","工作中 · 1 小时以上","c-blue"]]]];
 function scheme(cls,name){
