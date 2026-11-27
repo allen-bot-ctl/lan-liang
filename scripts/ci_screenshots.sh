@@ -143,7 +143,7 @@ v032cells() {  # $1=用例 $2=应有的 cells
   for ap in dark light; do
     l=$(grep -h "^DEBUG_MENUBAR_CELLS" "/tmp/shots--$1-$ap.log" | tail -n 1)
     echo "RELEASE: v032 $1 $ap: $l | $(grep -h "^DEBUG_MENUBAR " "/tmp/shots--$1-$ap.log" | tail -n 1 | sed -E 's/.*(content=[^ ]+ item=[^ ]+).*/\1/')"
-    [ "$(sed -E 's/.* cells=([^ ]+).*/\1/' <<<"$l")" = "$2" ] || { echo "::error::$1-$ap 菜单栏格子不对: $l（应为 $2）"; exit 1; }
+    [ "$(sed -E 's/.* cells=([^ ]+).*/\1/' <<<"$l")" = "$2" ] || { echo "::error::$1-$ap 菜单栏格子不对: ${l}（应为 $2）"; exit 1; }
     grep -q " template=0" <<<"$l" || { echo "::error::$1-$ap 菜单栏还是模板图: $l"; exit 1; }
   done
 }
@@ -201,8 +201,8 @@ chk() {
     [ -n "$l" ] || { echo "::error::$1-$ap 没有 DEBUG_MENUBAR"; exit 1; }
     [ "$(field "$l" items)" = 1 ] || { echo "::error::$1-$ap 状态项不是 1 个: $l"; exit 1; }
     [ "$(field "$l" visible)" = 1 ] || { echo "::error::$1-$ap 状态项不可见: $l"; exit 1; }
-    [ "$(field "$l" groups)" = "$2" ] || { echo "::error::$1-$ap 菜单栏行不对: $l（应为 $2）"; exit 1; }
-    [ "$(field "$l" rows)" = "$3" ] || { echo "::error::$1-$ap 行数不对: $l（应为 $3）"; exit 1; }
+    [ "$(field "$l" groups)" = "$2" ] || { echo "::error::$1-$ap 菜单栏行不对: ${l}（应为 $2）"; exit 1; }
+    [ "$(field "$l" rows)" = "$3" ] || { echo "::error::$1-$ap 行数不对: ${l}（应为 $3）"; exit 1; }
   done
 }
 chk normal-codex-daily 'codex:77%,gemini:44%+64' 2
@@ -212,7 +212,7 @@ chk gemini-only-gemini 'gemini:44%+64' 1
 chk none-codex-daily 'fallback' 0
 chk codex-5h-codex-daily 'codex:77%+36,gemini:44%+64' 2
 chk max-codex-daily 'codex:100%+100,gemini:100%+100' 2
-chk expired-codex-daily 'codex:--,gemini:--' 2
+chk expired-codex-daily 'codex:--,gemini:44%*+64*' 2
 chk keychain-unavailable-gemini 'codex:77%,gemini:--' 2
 chk low-codex-daily 'codex:8%+25,gemini:25%+64' 2
 chk failed-gemini 'codex:77%,gemini:--' 2
@@ -223,7 +223,7 @@ chk v030-single-gemini 'gemini:44%+64' 1
 for c in v030-both:compact v030-single-codex:single v030-single-gemini:single normal-codex-daily:compact codex-only-codex-daily:single; do
   for ap in dark light; do
     l=$(mbline "${c%%:*}" "$ap")
-    [ "$(field "$l" style)" = "${c##*:}" ] || { echo "::error::${c%%:*}-$ap 菜单栏样式不对: $l（应为 ${c##*:}）"; exit 1; }
+    [ "$(field "$l" style)" = "${c##*:}" ] || { echo "::error::${c%%:*}-$ap 菜单栏样式不对: ${l}（应为 ${c##*:}）"; exit 1; }
   done
   echo "RELEASE: menubar ${c%%:*} style=${c##*:} content=$(field "$(mbline "${c%%:*}" dark)" content)pt"
 done
