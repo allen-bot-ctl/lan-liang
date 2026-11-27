@@ -222,8 +222,10 @@ final class AgentStatusTests: XCTestCase {
         XCTAssertEqual(r2.status(now: t0 + 1198 + 600).phase, .idle)
         let huge = "{\"type\":\"PLANNER_RESPONSE\",\"source\":\"MODEL\",\"x\":\"" + String(repeating: "a", count: 70_000) + "\"}\n"
         let f3 = MemFS(); let r3 = ag(f3)
-        push(r3, f3, p, huge, at: t0)
-        XCTAssertEqual(r3.status(now: t0).phase, .working)
+        push(r3, f3, p, fin, at: t0)
+        XCTAssertEqual(r3.status(now: t0).phase, .done)
+        push(r3, f3, p, huge, at: t0 + 1)
+        XCTAssertEqual(r3.status(now: t0 + 1).phase, .working)
     }
 
     // 0.4.1 §D10：Codex 启动后新出现的文件从头读
