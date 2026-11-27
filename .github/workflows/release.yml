@@ -88,10 +88,22 @@ jobs:
           echo "SIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
           echo "SIGN_IDENTITY=LanLiang Self-Signed" >> "$GITHUB_ENV"
 
-      - name: Build universal app, dmg, zip without Gemini OAuth credentials
-        run: env -u ANTIGRAVITY_CLIENT_ID -u ANTIGRAVITY_CLIENT_SECRET scripts/build.sh "$VERSION"
+      - name: Require Antigravity OAuth client secrets
+        env:
+          ANTIGRAVITY_CLIENT_ID: ${{ secrets.ANTIGRAVITY_CLIENT_ID }}
+          ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.ANTIGRAVITY_CLIENT_SECRET }}
+        run: |
+          [ -n "$ANTIGRAVITY_CLIENT_ID" ] || { echo "::error::缺少 ANTIGRAVITY_CLIENT_ID，正式版必须能换新 Gemini 令牌"; exit 1; }
+          [ -n "$ANTIGRAVITY_CLIENT_SECRET" ] || { echo "::error::缺少 ANTIGRAVITY_CLIENT_SECRET，正式版必须能换新 Gemini 令牌"; exit 1; }
+          echo "RELEASE: antigravity_oauth=present"
 
-      - name: Require credential-free public packages
+      - name: Build universal app, dmg, zip
+        env:
+          ANTIGRAVITY_CLIENT_ID: ${{ secrets.ANTIGRAVITY_CLIENT_ID }}
+          ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.ANTIGRAVITY_CLIENT_SECRET }}
+        run: scripts/build.sh "$VERSION"
+
+      - name: Require OAuth client in every package
         shell: bash
         run: |
           set -euo pipefail
@@ -103,12 +115,9 @@ jobs:
           cmp "build/dmg/${NAME}.app/Contents/Info.plist" "$tmp/Info.plist"
           plutil -lint "$tmp/Info.plist"
           for key in LLAntigravityClientID LLAntigravityClientSecret; do
-            if /usr/libexec/PlistBuddy -c "Print :$key" "$tmp/Info.plist" >/dev/null 2>&1; then
-              echo "::error::Public package contains forbidden OAuth field $key"
-              exit 1
-            fi
+            /usr/libexec/PlistBuddy -c "Print :$key" "$tmp/Info.plist" >/dev/null 2>&1 || { echo "::error::Info.plist 缺 $key"; exit 1; }
           done
-          echo "RELEASE: antigravity_oauth=absent"
+          echo "RELEASE: antigravity_oauth=in_info_plist"
 
       - name: Verify stable signature
         shell: bash

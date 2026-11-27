@@ -21,7 +21,7 @@ public enum PanelText {
     public static func tabWindow(_ s: ServiceSnapshot, service: Service? = nil) -> QuotaWindow? {
         if service == .gemini && s.hasStaleQuota { return s.weekly ?? s.fiveHour }
         switch s.status {
-        case .notLoggedIn, .apiKeyOnly, .keychainDenied: return nil
+        case .notLoggedIn, .apiKeyOnly: return nil
         default: return s.weekly ?? s.fiveHour
         }
     }

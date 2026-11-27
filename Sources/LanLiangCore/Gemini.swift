@@ -1,35 +1,92 @@
 import Foundation
 
-/// Antigravity 登录凭证（文件或钥匙串里的 JSON）。只读，换新令牌只放内存。
+/// Antigravity 登录凭证（钥匙串项或 ~/.gemini 文件里的 JSON）。栏量只读官方凭据，换新结果只写自己的缓存。
 public struct GeminiCredential: Equatable {
     public var accessToken: String
     public var refreshToken: String?
     public var expiry: Date?
     public var idToken: String?
+    /// 账号邮箱：缓存里存的，或从 id_token 读出来的。
+    public var email: String?
 
-    public static let keychainPrefix = "go-keyring-base64:"
-
-    /// 钥匙串的值可能带 `go-keyring-base64:` 前缀。
-    public static func parse(_ raw: Data) -> GeminiCredential? {
-        var data = raw
-        if let s = String(data: raw, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           s.hasPrefix(keychainPrefix) {
-            guard let d = Data(base64Encoded: String(s.dropFirst(keychainPrefix.count))) else { return nil }
-            data = d
-        }
-        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let tok = obj["token"] as? [String: Any],
-              let access = tok["access_token"] as? String else { return nil }
-        return GeminiCredential(accessToken: access, refreshToken: tok["refresh_token"] as? String,
-                                expiry: parseFlexibleDate(tok["expiry"]), idToken: obj["id_token"] as? String)
+    public init(accessToken: String, refreshToken: String?, expiry: Date?, idToken: String?, email: String? = nil) {
+        self.accessToken = accessToken; self.refreshToken = refreshToken
+        self.expiry = expiry; self.idToken = idToken; self.email = email
     }
 
-    public func isExpired(now: Date, skew: TimeInterval = 60) -> Bool {
-        guard let e = expiry else { return false }
+    public static let keychainPrefix = "go-keyring-base64:"
+    public static let keychainHexPrefix = "go-keyring-encoded:"
+
+    /// 钥匙串值解成 JSON 字节：`go-keyring-base64:`、`go-keyring-encoded:`（十六进制）、
+    /// `security -w` 对非文本值打印的整段十六进制，或直接是 JSON。
+    public static func decodeStoredValue(_ raw: Data) -> Data? {
+        guard var text = String(data: raw, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        if let bytes = hexBytes(text), let inner = String(data: bytes, encoding: .utf8) {
+            text = inner.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let json: Data?
+        if text.hasPrefix(keychainPrefix) {
+            json = Data(base64Encoded: String(text.dropFirst(keychainPrefix.count)))
+        } else if text.hasPrefix(keychainHexPrefix) {
+            json = hexBytes(String(text.dropFirst(keychainHexPrefix.count)))
+        } else {
+            json = text.data(using: .utf8)
+        }
+        guard let d = json, d.first(where: { !($0 == 0x20 || $0 == 0x0A || $0 == 0x0D || $0 == 0x09) }) == UInt8(ascii: "{")
+        else { return nil }
+        return d
+    }
+
+    static func hexBytes(_ s: String) -> Data? {
+        let chars = Array(s.utf8)
+        guard !chars.isEmpty, chars.count % 2 == 0 else { return nil }
+        func nibble(_ c: UInt8) -> UInt8? {
+            switch c {
+            case 0x30...0x39: return c - 0x30
+            case 0x41...0x46: return c - 0x41 + 10
+            case 0x61...0x66: return c - 0x61 + 10
+            default: return nil
+            }
+        }
+        var out = Data(capacity: chars.count / 2)
+        var i = 0
+        while i < chars.count {
+            guard let hi = nibble(chars[i]), let lo = nibble(chars[i + 1]) else { return nil }
+            out.append(hi << 4 | lo)
+            i += 2
+        }
+        return out
+    }
+
+    public static func parse(_ raw: Data) -> GeminiCredential? {
+        guard let data = decodeStoredValue(raw),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let tok = obj["token"] as? [String: Any] else { return nil }
+        let access = (tok["access_token"] as? String) ?? ""
+        let refresh = (tok["refresh_token"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        guard !access.isEmpty || refresh != nil else { return nil }
+        let id = (obj["id_token"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        var email = (obj["email"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        if email == nil, let id { email = JWT.payload(id)?["email"] as? String }
+        return GeminiCredential(accessToken: access, refreshToken: refresh,
+                                expiry: parseFlexibleDate(tok["expiry"]), idToken: id, email: email)
+    }
+
+    /// 没有到期时间当作已过期（换新一次就有了）。
+    public func needsRefresh(now: Date, skew: TimeInterval) -> Bool {
+        guard !accessToken.isEmpty, let e = expiry else { return true }
         return e.timeIntervalSince(now) <= skew
     }
 
-    /// 文件读取顺序（先文件后钥匙串）。
+    /// 访问令牌本身还能不能用（不考虑提前换新）。
+    public func isUsable(now: Date) -> Bool {
+        guard !accessToken.isEmpty else { return false }
+        guard let e = expiry else { return false }
+        return e > now
+    }
+
+    /// ~/.gemini 下的官方镜像文件，钥匙串读不到时按这个顺序读。
     public static func candidateFiles(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [URL] {
         let g = home.appendingPathComponent(".gemini")
         return [g.appendingPathComponent("jetski-standalone-oauth-token"),

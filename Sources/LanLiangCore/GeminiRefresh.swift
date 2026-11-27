@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 
 /// 用 refresh_token 换新 Gemini（Antigravity）访问令牌。不写 ~/.gemini、不写钥匙串；
-/// 令牌来自栏量自己的缓存（~/.lanliang/gemini-token.json）时由 GeminiTokenProvider 写回缓存。
+/// 换新结果由 GeminiTokenProvider 写进栏量自己的缓存（~/.lanliang/gemini-token.json）。
 public enum GeminiTokenRefresh {
     /// 发请求的方式（测试里换成假的）：返回响应体和 HTTP 状态码。
     public typealias Transport = (URLRequest) async throws -> (Data, Int)
@@ -29,16 +29,26 @@ public enum GeminiTokenRefresh {
         return req
     }
 
+    /// 换新结果：新访问令牌和到期时间；接口另给了新 refresh_token / id_token 也带回来。
+    public struct Result: Equatable {
+        public var accessToken: String
+        public var expiry: Date
+        public var refreshToken: String?
+        public var idToken: String?
+    }
+
     /// 解析 token 接口响应；没有 access_token 返回 nil。expires_in 缺失按 1 小时。
-    public static func parse(_ data: Data, now: Date) -> (accessToken: String, expiry: Date)? {
+    public static func parse(_ data: Data, now: Date) -> Result? {
         guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let at = obj["access_token"] as? String, !at.isEmpty else { return nil }
         let secs = looseDouble(obj["expires_in"]) ?? 3_600
-        return (at, now.addingTimeInterval(secs))
+        func nonEmpty(_ k: String) -> String? { (obj[k] as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        return Result(accessToken: at, expiry: now.addingTimeInterval(secs),
+                      refreshToken: nonEmpty("refresh_token"), idToken: nonEmpty("id_token"))
     }
 
     public static func refresh(refreshToken: String, clientID: String, clientSecret: String,
-                               now: Date, transport: Transport) async throws -> (accessToken: String, expiry: Date) {
+                               now: Date, transport: Transport) async throws -> Result {
         guard !refreshToken.isEmpty, !clientID.isEmpty, !clientSecret.isEmpty else { throw Failed() }
         let req = request(refreshToken: refreshToken, clientID: clientID, clientSecret: clientSecret)
         let (data, code): (Data, Int)

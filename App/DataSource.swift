@@ -1,6 +1,4 @@
 import Foundation
-import Security
-import LocalAuthentication
 
 /// 一次刷新的回调：各自到了就各自调用，都在主线程（契约 0.1.5 §5）。
 struct RefreshHandlers {
@@ -19,7 +17,6 @@ protocol DataSource: AnyObject {
     var fixedNow: Date? { get }
     /// selection：关掉的服务不请求、不回调（契约 0.3.0 §1）。
     func refresh(current: (ServiceSnapshot, ServiceSnapshot), selection: ServiceSelection, handlers: RefreshHandlers)
-    func allowKeychainAgain()
     /// 只读取已有磁盘缓存，不扫描本机对话库。缓存存在时回主线程。
     func loadCachedGeminiHistory(completion: @escaping (GeminiHistory) -> Void)
     /// Gemini 本机 Token 历史：后台串行扫描，结果回主线程；扫描还在跑时不再新起。
@@ -60,7 +57,6 @@ final class FakeSource: DataSource {
         }
     }
 
-    func allowKeychainAgain() {}
 
     func loadCachedGeminiHistory(completion: @escaping (GeminiHistory) -> Void) {
         refreshGeminiHistory(completion: completion)
@@ -78,7 +74,7 @@ final class FakeSource: DataSource {
 
 }
 
-// MARK: - 真实数据（只读 ~/.codex、~/.gemini、钥匙串；只写自己的 ~/.lanliang）
+// MARK: - 真实数据（只读 ~/.codex、~/.gemini、Antigravity 钥匙串项（经 /usr/bin/security）；只写自己的 ~/.lanliang）
 
 enum HTTPFailure: Error { case unauthorized, failed }
 
@@ -112,7 +108,6 @@ final class LiveSource: DataSource {
             onAllDone: { h.onAllDone() })
     }
 
-    func allowKeychainAgain() { gemini.allowKeychainAgain() }
 
     /// 不与前台操作竞争 CPU；缓存读取和扫描共用队列，避免状态交错。
     private let historyQueue = DispatchQueue(label: "lanliang.gemini-history", qos: .utility)
@@ -223,40 +218,22 @@ final class CodexLive {
 // MARK: Gemini（Antigravity 登录）
 
 final class GeminiLive {
-    // 栏量不携带 OAuth 客户端凭据；只读 Antigravity 当前登录状态。
+    /// Antigravity 安装版 OAuth 客户端：发版时由 build.sh 从仓库 Secret 写进 Info.plist，源码里没有。
+    /// 本地或 CI 构建没写入时为空，这时不换新令牌，只用官方凭据里还没过期的访问令牌。
+    private static func infoString(_ key: String) -> String {
+        (Bundle.main.object(forInfoDictionaryKey: key) as? String) ?? ""
+    }
+
+    // 官方登录只经 /usr/bin/security 读（不弹授权窗口），栏量不写钥匙串、不写 ~/.gemini。
     private let provider = GeminiTokenProvider(
         home: FileManager.default.homeDirectoryForCurrentUser,
-        keychain: { GeminiLive.readKeychain(interactive: true) },
-        noninteractiveKeychain: { GeminiLive.readKeychain(interactive: false) },
-        clientID: "", clientSecret: "",
-        transport: { _ in throw GeminiTokenProvider.TokenError.expired })
-
-    func allowKeychainAgain() { provider.allowKeychainAgain() }
-
-    /// 只读 Antigravity 存的钥匙串项（gemini / antigravity）；栏量从不写钥匙串。
-    private static func readKeychain(interactive: Bool) -> GeminiTokenProvider.KeychainRead {
-        var q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                kSecAttrService as String: "gemini",
-                                kSecAttrAccount as String: "antigravity",
-                                kSecReturnData as String: true,
-                                kSecMatchLimit as String: kSecMatchLimitOne]
-        if !interactive {
-            let context = LAContext()
-            context.interactionNotAllowed = true
-            q[kSecUseAuthenticationContext as String] = context
-        }
-        var out: CFTypeRef?
-        let status = KeychainInteraction.perform(interactive: interactive) {
-            SecItemCopyMatching(q as CFDictionary, &out)
-        }
-        switch status {
-        case errSecSuccess: return (out as? Data).map { .found($0) } ?? .notFound
-        case errSecItemNotFound: return .notFound
-        // 无 UI 的错误码无法证明用户拒绝；系统会话/钥匙串也可能暂不可交互。
-        case errSecUserCanceled, errSecAuthFailed: return interactive ? .denied : .unavailable
-        default: return .unavailable
-        }
-    }
+        official: { GeminiOfficialSource.readKeychainItem() },
+        clientID: GeminiLive.infoString("LLAntigravityClientID"),
+        clientSecret: GeminiLive.infoString("LLAntigravityClientSecret"),
+        transport: { req in
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            return (data, (resp as? HTTPURLResponse)?.statusCode ?? 0)
+        })
 
     private var ideVersion: String {
         let plist = "/Applications/Antigravity.app/Contents/Info.plist"
@@ -313,10 +290,10 @@ final class GeminiLive {
 
     func fetch(previous: ServiceSnapshot) async -> ServiceSnapshot {
         do {
-            return try await provider.withKeylessAccess { credential in
-                // A successful source may correspond to a different Antigravity account.
+            return try await provider.withAccess { credential in
+                // 每次按当前凭据重建：Antigravity 换了账号，账号、套餐和额度跟着换。
                 var snap = ServiceSnapshot(status: .ok)
-                if let id = credential.idToken { snap.email = JWT.payload(id)?["email"] as? String }
+                snap.email = credential.email
                 do {
                     try await query(token: credential.accessToken, into: &snap)
                 } catch HTTPFailure.unauthorized {
@@ -326,22 +303,17 @@ final class GeminiLive {
                 return snap
             }
         } catch GeminiTokenProvider.TokenError.notLoggedIn {
-            var snap = previous
-            snap.status = (previous.status == .loginExpired || previous.hasQuota) ? .loginExpired : .notLoggedIn
-            return snap
-        } catch GeminiTokenProvider.TokenError.keychainUnavailable {
+            return ServiceSnapshot(status: .notLoggedIn)
+        } catch GeminiTokenProvider.TokenError.unavailable {
             var snap = previous
             snap.status = .keychainUnavailable
-            return snap
-        } catch GeminiTokenProvider.TokenError.keychainDenied {
-            var snap = previous
-            snap.status = .keychainDenied
             return snap
         } catch GeminiTokenProvider.TokenError.expired {
             var snap = previous
             snap.status = .loginExpired
             return snap
         } catch {
+            // 断网或换新临时失败：保留上次额度，下个周期重试，不算登录过期。
             var snap = previous
             snap.status = .fetchFailed
             return snap

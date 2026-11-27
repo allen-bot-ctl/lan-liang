@@ -16,7 +16,7 @@ obj["codex"]["status"]="ok"
 obj["gemini"]["status"]="fetchFailed"
 with open(sys.argv[2],"w") as f: json.dump(obj,f)
 PY
-for item in "login-expired|$PWD/fixtures/expired.json" "keychain-denied|$PWD/fixtures/keychain-denied.json" "service-failed|$RUNNER_TEMP/gemini-service-failed.json"; do
+for item in "login-expired|$PWD/fixtures/expired.json" "keychain-unavailable|$PWD/fixtures/keychain-unavailable.json" "service-failed|$RUNNER_TEMP/gemini-service-failed.json"; do
     label=${item%%|*}; fixture=${item#*|}
     log="$out/$label.log"
     LANLIANG_FAKE="$fixture" "$bin" --debug-open-panel --debug-tab=gemini --debug-services=codex,gemini         --debug-appearance=light >"$log" 2>&1 &

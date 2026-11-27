@@ -41,7 +41,7 @@ public enum Service: String, CaseIterable, Codable {
 
 /// 服务状态（契约 §4 状态表）。
 public enum ServiceStatus: String, Codable, Equatable {
-    case ok, loading, fetchFailed, loginExpired, apiKeyOnly, notLoggedIn, keychainUnavailable, keychainDenied
+    case ok, loading, fetchFailed, loginExpired, apiKeyOnly, notLoggedIn, keychainUnavailable
 }
 
 /// 一个服务当前的全部数据；额度保留上次成功值。
@@ -72,7 +72,7 @@ public struct ServiceSnapshot: Codable, Equatable {
 
     /// Gemini 暂时拿不到新额度时，旧值仅供参考。
     public var hasStaleQuota: Bool {
-        hasQuota && [.fetchFailed, .loginExpired, .keychainUnavailable, .keychainDenied].contains(status)
+        hasQuota && [.fetchFailed, .loginExpired, .keychainUnavailable].contains(status)
     }
 
     /// 面板额度区的提示文字（红字或灰字）；nil 表示不显示提示。
@@ -81,16 +81,15 @@ public struct ServiceSnapshot: Codable, Equatable {
         case .ok: return nil
         case .loading: return hasQuota ? nil : "正在读取…"
         case .fetchFailed:
-            return service == .gemini ? "Gemini 额度获取失败，可重新读取登录后再试"
+            return service == .gemini ? "Gemini 额度获取失败，栏量会自动重试"
                                       : "额度获取失败，5 分钟后自动重试"
         case .loginExpired:
             return service == .codex ? "Codex 登录已过期，在终端运行一次 codex 重新登录"
-                                     : "Gemini 登录已过期，请在 Antigravity 登录后重新读取"
+                                     : "Gemini 登录已过期，请打开 Antigravity 重新登录"
         case .apiKeyOnly: return "API Key 账号没有订阅额度"
         case .notLoggedIn:
             return service == .gemini ? "未检测到 Antigravity 登录" : "未检测到登录"
-        case .keychainUnavailable: return "暂时无法在后台读取 Gemini 登录，栏量会自动重试"
-        case .keychainDenied: return "需要钥匙串授权才能重新读取 Gemini 登录"
+        case .keychainUnavailable: return "暂时无法读取 Gemini 登录，栏量会自动重试"
         }
     }
 }
@@ -131,7 +130,7 @@ public enum MenuBarText {
             }
         }
         switch s.status {
-        case .notLoggedIn, .apiKeyOnly, .keychainDenied:
+        case .notLoggedIn, .apiKeyOnly:
             return nil
         case .loginExpired, .keychainUnavailable:
             return MenuBarGroup(service: service, primary: "--", secondary: nil)

@@ -31,7 +31,6 @@ final class PanelModel: ObservableObject {
     var appVersion = ""
     var now: () -> Date = { Date() }
     var onRefresh: () -> Void = {}
-    var onReauthorizeKeychain: () -> Void = {}
     var onCheckUpdates: () -> Void = {}
     var onOpenSettings: () -> Void = {}
 
@@ -90,7 +89,7 @@ struct PanelView: View {
         let tab = model.shownTab
         return VStack(alignment: .leading, spacing: 8) {
             ServiceSection(service: tab, snap: model.snapshot(tab), now: model.now(),
-                           onReauthorize: model.onReauthorizeKeychain, single: model.services.isSingle)
+                           single: model.services.isSingle)
             if tab == .codex, model.codex.status != .notLoggedIn, model.codex.status != .apiKeyOnly {
                 TokenChartSection(model: model, service: .codex)
             }
@@ -274,7 +273,7 @@ struct SingleServiceHeader: View {
 
     var body: some View {
         let th = Theme(scheme)
-        let showAccount = snap.status != .notLoggedIn && snap.status != .keychainUnavailable && snap.status != .keychainDenied
+        let showAccount = snap.status != .notLoggedIn && snap.status != .keychainUnavailable
         let days = daysLeft
         HStack(spacing: 8) {
             ZStack {
@@ -315,7 +314,6 @@ struct ServiceSection: View {
     let service: Service
     let snap: ServiceSnapshot
     let now: Date
-    let onReauthorize: () -> Void
     /// 只开一个服务：账号行挪到服务头卡片，额度放大（契约 0.3.0 §2）。
     var single = false
     @Environment(\.colorScheme) private var scheme
@@ -333,7 +331,7 @@ struct ServiceSection: View {
     var body: some View {
         let th = Theme(scheme)
         let sub = subscription
-        let showAccount = snap.status != .notLoggedIn && snap.status != .keychainUnavailable && snap.status != .keychainDenied && (snap.plan != nil || snap.email != nil)
+        let showAccount = snap.status != .notLoggedIn && snap.status != .keychainUnavailable && (snap.plan != nil || snap.email != nil)
         VStack(alignment: .leading, spacing: 8) {
             if !single, showAccount || sub != nil {
                 HStack(spacing: 8) {
@@ -359,7 +357,7 @@ struct ServiceSection: View {
             }
             let msg = snap.message(for: service)
             let stale = service == .gemini && snap.hasStaleQuota
-            if snap.hasQuota || msg != nil || snap.status == .keychainDenied {
+            if snap.hasQuota || msg != nil {
                 VStack(alignment: .leading, spacing: single ? 14 : 12) {
                     if snap.hasQuota {
                         VStack(alignment: .leading, spacing: 4) {
@@ -379,17 +377,11 @@ struct ServiceSection: View {
                             .frame(maxWidth: .infinity, alignment: snap.hasQuota ? .leading : .center)
                             .padding(.vertical, snap.status == .notLoggedIn ? 24 : 0)
                     }
-                    if service == .gemini && [.loginExpired, .notLoggedIn, .fetchFailed, .keychainUnavailable, .keychainDenied].contains(snap.status) {
-                        HStack(spacing: 8) {
-                            if snap.status == .loginExpired || snap.status == .notLoggedIn {
-                                Button(action: openAntigravity) {
-                                    Label("打开 Antigravity", systemImage: "arrow.up.forward.app")
-                                }
-                                .help("通过 Antigravity 完成 Google 登录；栏量不会收集密码")
-                            }
-                            Button(snap.status == .keychainDenied ? "重新授权钥匙串" : "重新读取登录", action: onReauthorize)
-                                .help("主动从 Antigravity 重新读取本机登录并重试额度")
+                    if service == .gemini && (snap.status == .loginExpired || snap.status == .notLoggedIn) {
+                        Button(action: openAntigravity) {
+                            Label("打开 Antigravity", systemImage: "arrow.up.forward.app")
                         }
+                        .help("通过 Antigravity 完成 Google 登录；栏量不会收集密码")
                         .font(.system(size: 11, weight: .medium))
                         .frame(maxWidth: .infinity)
                     }

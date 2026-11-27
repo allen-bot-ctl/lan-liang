@@ -133,7 +133,7 @@ public enum SettingsText {
         switch snap.status {
         case .notLoggedIn:
             return "未检测到登录"
-        case .keychainUnavailable, .keychainDenied, .apiKeyOnly:
+        case .keychainUnavailable, .apiKeyOnly:
             return snap.message(for: service) ?? "未检测到登录"
         case .loading where snap.plan == nil && snap.email == nil:
             return "正在读取…"

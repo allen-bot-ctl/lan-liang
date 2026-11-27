@@ -1,7 +1,7 @@
 import Foundation
 
 extension GeminiCredential {
-    /// 序列化成和 Antigravity 令牌文件相同的 JSON（0.1.0 契约 §3.1）。
+    /// 序列化成和 Antigravity 令牌文件相同的 JSON（0.1.0 契约 §3.1），另存账号邮箱。
     public func fileData() -> Data {
         var tok: [String: Any] = ["access_token": accessToken, "token_type": "Bearer"]
         if let r = refreshToken { tok["refresh_token"] = r }
@@ -12,6 +12,7 @@ extension GeminiCredential {
         }
         var obj: [String: Any] = ["token": tok]
         if let id = idToken { obj["id_token"] = id }
+        if let e = email { obj["email"] = e }
         return (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data()
     }
 }
@@ -21,11 +22,9 @@ public enum GeminiTokenCache {
     public static func directory(home: URL) -> URL { home.appendingPathComponent(".lanliang", isDirectory: true) }
     public static func file(home: URL) -> URL { directory(home: home).appendingPathComponent("gemini-token.json") }
 
+    /// 读缓存。目录不是 700、文件不是 600 或不归当前用户就不用。
+    /// 0.3.13 及以前的缓存只有访问令牌、没有 refresh_token：直接删掉，按官方凭据重建。
     public static func read(home: URL) -> GeminiCredential? {
-        FileManager.default.contents(atPath: file(home: home).path).flatMap(GeminiCredential.parse)
-    }
-
-    static func readPrivateAccess(home: URL) -> GeminiCredential? {
         let fm = FileManager.default
         let dir = directory(home: home)
         let path = file(home: home)
@@ -33,26 +32,19 @@ public enum GeminiTokenCache {
             guard let attrs = try? fm.attributesOfItem(atPath: target.path) else { return false }
             return attrs[.type] as? FileAttributeType == type &&
                 (attrs[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() &&
-                (attrs[.posixPermissions] as? NSNumber)?.uint16Value == mode
+                ((attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0) & 0o777 == mode
         }
         guard isPrivate(dir, type: .typeDirectory, mode: 0o700),
-              isPrivate(path, type: .typeRegular, mode: 0o600) else { return nil }
-        return read(home: home)
-    }
-
-    /// Keep only the verified, explicitly expiring access token in the app's private cache.
-    static func rememberVerifiedAccess(_ c: GeminiCredential, home: URL, now: Date) throws {
-        guard let expiry = c.expiry, expiry.timeIntervalSince(now) > 60,
-              !c.accessToken.isEmpty else { return }
-        let trimmed = GeminiCredential(accessToken: c.accessToken, refreshToken: nil,
-                                       expiry: min(expiry, now.addingTimeInterval(3600)), idToken: nil)
-        if readPrivateAccess(home: home) != trimmed {
-            try write(trimmed, home: home)
+              isPrivate(path, type: .typeRegular, mode: 0o600),
+              let data = fm.contents(atPath: path.path) else { return nil }
+        guard let c = GeminiCredential.parse(data), c.refreshToken != nil else {
+            remove(home: home)
+            return nil
         }
+        return c
     }
 
-    static func discardRejectedAccess(_ token: String, home: URL) {
-        guard readPrivateAccess(home: home)?.accessToken == token else { return }
+    public static func remove(home: URL) {
         try? FileManager.default.removeItem(at: file(home: home))
     }
 
@@ -79,238 +71,153 @@ public enum GeminiTokenCache {
     }
 }
 
-/// Gemini 登录来源与令牌换新（契约 0.1.3 §2）：
-/// 读取顺序 ~/.gemini 两份文件 → ~/.lanliang 缓存 → 钥匙串（只读）。
-/// 只有从钥匙串读到时才写缓存；令牌来自缓存时换新结果写回缓存；
-/// 缓存里的 refresh_token 被拒时回钥匙串重读一次，本次运行不再反复读。
+/// Gemini 登录来源与令牌换新（契约 0.3.14 §1-§3）：
+/// 每个周期先读官方凭据（钥匙串项经 /usr/bin/security，读不到再看 ~/.gemini 两份文件），
+/// 再和 ~/.lanliang 缓存对照；访问令牌剩不到 15 分钟就用 refresh_token 换新，结果只写缓存。
+/// 从不写钥匙串或 ~/.gemini，从不弹窗。
 public final class GeminiTokenProvider {
-    public enum KeychainRead: Equatable { case found(Data), notFound, unavailable, denied }
-    public enum Source: Equatable { case antigravityFile, cache }
-    public enum Load: Equatable { case found(GeminiCredential, Source), none, denied }
-    public enum TokenError: Error, Equatable { case expired, failed, notLoggedIn, keychainUnavailable, keychainDenied }
+    public enum TokenError: Error, Equatable {
+        /// refresh_token 失效或额度接口两次 401：请用户在 Antigravity 重新登录。
+        case expired
+        /// 网络或换新接口临时失败：保留旧数据，下个周期重试。
+        case failed
+        /// security 退出码 44 且没有官方文件：Antigravity 没登录。
+        case notLoggedIn
+        /// 这次读不到官方凭据，也没有缓存。
+        case unavailable
+    }
+
+    public static let refreshSkew: TimeInterval = 15 * 60
 
     private let home: URL
-    private let keychain: () -> KeychainRead
-    private let noninteractiveKeychain: (() -> KeychainRead)?
+    private let official: () -> GeminiOfficialSource.Read
     private let clientID: String
     private let clientSecret: String
     private let transport: GeminiTokenRefresh.Transport
     private let now: () -> Date
     private let lock = NSLock()
+    /// 被令牌接口拒绝过的 refresh_token；官方凭据换成别的之前不再拿它请求。
+    private var deadRefreshToken: String?
 
-    private var keychainDenied = false
-    private var keychainRetried = false
-    private var keylessRereadRequested = false
-    private enum KeylessOrigin: Equatable { case file(Int), keychain, cache }
-    private var keylessPreferred: KeylessOrigin?
-    private var keylessAcceptedKeychain: GeminiCredential?
+    /// 测试/诊断用：读了几次官方凭据。
+    public private(set) var officialReads = 0
+
     public var canRefresh: Bool { !clientID.isEmpty && !clientSecret.isEmpty }
-    /// 来自 Antigravity 文件时，换新的令牌只放内存（不写 ~/.gemini）。
-    private var memory: (refreshToken: String, access: String, expiry: Date)?
 
-    /// 测试/诊断用：本次运行读了几次钥匙串。
-    public private(set) var keychainReads = 0
-
-    public init(home: URL, keychain: @escaping () -> KeychainRead,
-                noninteractiveKeychain: (() -> KeychainRead)? = nil, clientID: String, clientSecret: String,
+    public init(home: URL, official: @escaping () -> GeminiOfficialSource.Read,
+                clientID: String, clientSecret: String,
                 transport: @escaping GeminiTokenRefresh.Transport, now: @escaping () -> Date = Date.init) {
-        self.home = home; self.keychain = keychain; self.noninteractiveKeychain = noninteractiveKeychain
+        self.home = home; self.official = official
         self.clientID = clientID; self.clientSecret = clientSecret
         self.transport = transport; self.now = now
     }
 
     private func locked<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
 
-    /// 用户点了「重新授权」：允许再读钥匙串。
-    public func allowKeychainAgain() {
-        locked {
-            keychainDenied = false
-            keychainRetried = false
-            keylessRereadRequested = true
-        }
-    }
+    private enum Official { case credential(GeminiCredential), notLoggedIn, unavailable }
 
-    private func readKeychain() -> KeychainRead {
-        if locked({ keychainDenied }) { return .denied }
-        locked { keychainReads += 1 }
-        let r = keychain()
-        if r == .denied { locked { keychainDenied = true } }
-        return r
-    }
-
-    /// 钥匙串读到就写缓存并返回。
-    private func loadFromKeychain() -> Load {
-        switch readKeychain() {
-        case .found(let d):
-            guard let c = GeminiCredential.parse(d) else { return .none }
-            try? GeminiTokenCache.write(c, home: home)
-            return .found(c, .cache)
-        case .notFound, .unavailable: return .none
-        case .denied: return .denied
-        }
-    }
-
-    public func load() -> Load {
+    private func readFiles() -> GeminiCredential? {
         for f in GeminiCredential.candidateFiles(home: home) {
-            if let d = FileManager.default.contents(atPath: f.path), let c = GeminiCredential.parse(d) {
-                return .found(c, .antigravityFile)
-            }
+            if let d = FileManager.default.contents(atPath: f.path), let c = GeminiCredential.parse(d) { return c }
         }
-        if let c = GeminiTokenCache.read(home: home) { return .found(c, .cache) }
-        return loadFromKeychain()
+        return nil
     }
 
-    /// Tries current credentials with the normal quota request, never the refresh endpoint.
-    /// Background attempts can do at most one noninteractive keychain read and cannot prompt.
-    /// An explicit re-read skips the app cache and in-memory credentials, checks both provider
-    /// files, and then permits one interactive keychain read.
-    public func withKeylessAccess<T>(_ query: (GeminiCredential) async throws -> T) async throws -> T {
-        let context = locked { () -> (Bool, KeylessOrigin?, GeminiCredential?, Bool) in
-            let result = (keylessRereadRequested, keylessPreferred, keylessAcceptedKeychain, keychainDenied)
-            keylessRereadRequested = false
-            return result
+    private func readOfficial() -> Official {
+        locked { officialReads += 1 }
+        switch official() {
+        case .found(let data):
+            if let c = GeminiCredential.parse(data) { return .credential(c) }
+            return readFiles().map(Official.credential) ?? .unavailable
+        case .notFound:
+            return readFiles().map(Official.credential) ?? .notLoggedIn
+        case .unavailable:
+            return readFiles().map(Official.credential) ?? .unavailable
         }
-        let (reread, preferred, keychainCredential, denied) = context
-        var sawCredential = keychainCredential != nil
-        var attempted = Set<String>()
-        var rejected = false
-
-        func files() -> [(KeylessOrigin, GeminiCredential)] {
-            GeminiCredential.candidateFiles(home: home).enumerated().compactMap { index, file in
-                guard let data = FileManager.default.contents(atPath: file.path),
-                      let credential = GeminiCredential.parse(data) else { return nil }
-                return (.file(index), credential)
-            }
-        }
-
-        func tryCandidates(_ candidates: [(KeylessOrigin, GeminiCredential)]) async throws -> T? {
-            for (origin, credential) in candidates {
-                sawCredential = true
-                guard !credential.accessToken.isEmpty, !credential.isExpired(now: now()),
-                      attempted.insert(credential.accessToken).inserted else { continue }
-                do {
-                    let result = try await query(credential)
-                    locked {
-                        keylessPreferred = origin
-                        if origin == .keychain { keylessAcceptedKeychain = credential }
-                    }
-                    try? GeminiTokenCache.rememberVerifiedAccess(credential, home: home, now: now())
-                    return result
-                } catch TokenError.expired {
-                    GeminiTokenCache.discardRejectedAccess(credential.accessToken, home: home)
-                    rejected = true
-                    // A 401 may coincide with Antigravity rotating its credential.
-                    // Never retry the same token in this request.
-                }
-            }
-            return nil
-        }
-
-        if !reread, let cached = GeminiTokenCache.readPrivateAccess(home: home) {
-            sawCredential = true
-            if cached.expiry != nil, let result = try await tryCandidates([(.cache, cached)]) {
-                return result
-            }
-        }
-
-        var current = files()
-        if !reread {
-            if let keychainCredential { current.append((.keychain, keychainCredential)) }
-            if let preferred, let i = current.firstIndex(where: { $0.0 == preferred }), i > 0 {
-                let first = current.remove(at: i)
-                current.insert(first, at: 0)
-            }
-        }
-        if let result = try await tryCandidates(current) { return result }
-        if rejected, let result = try await tryCandidates(files()) { return result }
-
-        if reread {
-            switch readKeychain() {
-            case .found(let data):
-                if let credential = GeminiCredential.parse(data),
-                   let result = try await tryCandidates([(.keychain, credential)]) {
-                    return result
-                }
-            case .denied: throw TokenError.keychainDenied
-            case .unavailable: throw TokenError.keychainUnavailable
-            case .notFound: break
-            }
-        } else if denied {
-            throw TokenError.keychainDenied
-        } else if let noninteractiveKeychain {
-            // Only one no-UI read, after candidate files/cache have failed. A locked keychain
-            // here may simply require interaction; leave that decision to the explicit CTA.
-            locked { keychainReads += 1 }
-            switch noninteractiveKeychain() {
-            case .found(let data):
-                if let credential = GeminiCredential.parse(data),
-                   let result = try await tryCandidates([(.keychain, credential)]) {
-                    return result
-                }
-            case .unavailable, .denied: throw TokenError.keychainUnavailable
-            case .notFound: break
-            }
-        }
-        throw sawCredential ? TokenError.expired : TokenError.notLoggedIn
     }
 
-    private func refresh(_ rt: String) async throws -> (accessToken: String, expiry: Date) {
-        try await GeminiTokenRefresh.refresh(refreshToken: rt, clientID: clientID, clientSecret: clientSecret,
-                                             now: now(), transport: transport)
+    /// 官方凭据和缓存对照：同一个 refresh_token 用缓存（访问令牌可能更新），
+    /// 不同就用官方的覆盖缓存（Antigravity 换了账号或重新登录）。
+    private func adopt(_ o: GeminiCredential, cache: GeminiCredential?) -> GeminiCredential {
+        guard let rt = o.refreshToken else {
+            // 官方凭据没有 refresh_token，换新不了；只用它的访问令牌，不进缓存。
+            GeminiTokenCache.remove(home: home)
+            return o
+        }
+        if var c = cache, c.refreshToken == rt {
+            var changed = false
+            if !o.accessToken.isEmpty, (o.expiry ?? .distantPast) > (c.expiry ?? .distantPast) {
+                c.accessToken = o.accessToken; c.expiry = o.expiry; changed = true
+            }
+            if c.idToken == nil, o.idToken != nil { c.idToken = o.idToken; changed = true }
+            if c.email == nil, o.email != nil { c.email = o.email; changed = true }
+            if changed { try? GeminiTokenCache.write(c, home: home) }
+            return c
+        }
+        try? GeminiTokenCache.write(o, home: home)
+        return o
     }
 
-    /// 可用的访问令牌。没过期直接用；过期或 force（接口 401）时换新。
-    /// 返回值里的 credential 是换新后的（可能已写回缓存）。
-    public func accessToken(_ c: GeminiCredential, source: Source, force: Bool = false) async throws -> String {
-        if !force, !c.isExpired(now: now()) { return c.accessToken }
-        guard canRefresh else { throw TokenError.expired }
-        guard let rt = c.refreshToken, !rt.isEmpty else {
-            if source == .cache, let alt = try await retryFromKeychain(replacing: c) { return alt }
+    private func current() throws -> GeminiCredential {
+        let cache = GeminiTokenCache.read(home: home)
+        switch readOfficial() {
+        case .credential(let o):
+            return adopt(o, cache: cache)
+        case .notLoggedIn:
+            GeminiTokenCache.remove(home: home)
+            throw TokenError.notLoggedIn
+        case .unavailable:
+            if let cache { return cache }
+            throw TokenError.unavailable
+        }
+    }
+
+    /// 用可用的访问令牌查一次；查询里抛 `TokenError.expired`（接口 401）时强制换新、只重试一次。
+    public func withAccess<T>(_ query: (GeminiCredential) async throws -> T) async throws -> T {
+        var reread = false
+        var c = try await ensureFresh(try current(), force: false, reread: &reread)
+        do {
+            return try await query(c)
+        } catch TokenError.expired {
+            guard canRefresh, c.refreshToken != nil else { throw TokenError.expired }
+            c = try await ensureFresh(c, force: true, reread: &reread)
+            return try await query(c)
+        }
+    }
+
+    private func ensureFresh(_ c: GeminiCredential, force: Bool, reread: inout Bool) async throws -> GeminiCredential {
+        let t = now()
+        if !force, !c.needsRefresh(now: t, skew: Self.refreshSkew) { return c }
+        guard canRefresh, let rt = c.refreshToken else {
+            if !force, c.isUsable(now: t) { return c }
             throw TokenError.expired
         }
-        if source == .antigravityFile, !force, let m = locked({ memory }), m.refreshToken == rt,
-           m.expiry.timeIntervalSince(now()) > 60 { return m.access }
+        if locked({ deadRefreshToken }) == rt { throw TokenError.expired }
         do {
-            let r = try await refresh(rt)
-            switch source {
-            case .antigravityFile:
-                locked { memory = (rt, r.accessToken, r.expiry) }
-            case .cache:
-                var n = c
-                n.accessToken = r.accessToken
-                n.expiry = r.expiry
-                try? GeminiTokenCache.write(n, home: home)
-            }
-            return r.accessToken
-        } catch is GeminiTokenRefresh.Rejected {
-            if source == .cache, let alt = try await retryFromKeychain(replacing: c) { return alt }
-            throw TokenError.expired
-        } catch {
-            throw TokenError.failed
-        }
-    }
-
-    /// 缓存的 refresh_token 被拒：重读一次钥匙串；内容不同就覆盖缓存再试一次。
-    private func retryFromKeychain(replacing old: GeminiCredential) async throws -> String? {
-        let first = locked { () -> Bool in
-            if keychainRetried { return false }
-            keychainRetried = true
-            return true
-        }
-        guard first, case .found(let d) = readKeychain(), let c = GeminiCredential.parse(d), c != old else { return nil }
-        try? GeminiTokenCache.write(c, home: home)
-        if !c.isExpired(now: now()) { return c.accessToken }
-        guard let rt = c.refreshToken, !rt.isEmpty else { return nil }
-        do {
-            let r = try await refresh(rt)
+            let r = try await GeminiTokenRefresh.refresh(refreshToken: rt, clientID: clientID,
+                                                         clientSecret: clientSecret, now: t, transport: transport)
             var n = c
             n.accessToken = r.accessToken
             n.expiry = r.expiry
+            if let x = r.refreshToken { n.refreshToken = x }
+            if let id = r.idToken {
+                n.idToken = id
+                if let e = JWT.payload(id)?["email"] as? String, !e.isEmpty { n.email = e }
+            }
             try? GeminiTokenCache.write(n, home: home)
-            return r.accessToken
+            return n
         } catch is GeminiTokenRefresh.Rejected {
-            return nil
+            // invalid_grant：重读一次官方凭据，refresh_token 换过了就用新的。
+            if !reread {
+                reread = true
+                if case .credential(let o) = readOfficial(), let ort = o.refreshToken, ort != rt {
+                    return try await ensureFresh(adopt(o, cache: nil), force: force, reread: &reread)
+                }
+            }
+            locked { deadRefreshToken = rt }
+            throw TokenError.expired
         } catch {
+            if !force, c.isUsable(now: t) { return c }
             throw TokenError.failed
         }
     }

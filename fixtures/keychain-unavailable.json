@@ -14,7 +14,7 @@
   "planIsLive": true
  },
  "gemini": {
-  "status": "keychainDenied",
+  "status": "keychainUnavailable",
   "email": null,
   "plan": null,
   "weekly": null,
