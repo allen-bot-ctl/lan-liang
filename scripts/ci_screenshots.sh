@@ -48,6 +48,22 @@ shoot() {  # $1=后缀  其余=启动参数
   done
 }
 
+# 0.3.15：Esc 分层退出。依次：悬停预览不抢焦点、点图标固定（成为键盘焦点）、进设置、⌘Esc 不处理、
+# Esc 回主页、Esc 收起面板、再点图标停在主页。应用打印 DEBUG_ESC_LIFECYCLE ok 才算过。不截图（PM 00:54）。
+esc_log=/tmp/esc-lifecycle.log
+LANLIANG_FAKE="$PWD/fixtures/normal.json" "$bin" --debug-esc-lifecycle >"$esc_log" 2>&1 &
+esc_pid=$!
+for _ in $(seq 1 20); do
+  grep -q '^DEBUG_ESC_LIFECYCLE ' "$esc_log" && break
+  kill -0 "$esc_pid" 2>/dev/null || break
+  sleep 1
+done
+kill -TERM "$esc_pid" 2>/dev/null || true; sleep 1; kill -KILL "$esc_pid" 2>/dev/null || true
+cat "$esc_log"
+esc_line=$(grep '^DEBUG_ESC_LIFECYCLE ' "$esc_log" | tail -n 1 || true)
+[[ "$esc_line" == "DEBUG_ESC_LIFECYCLE ok "* ]] || { echo "::error::Esc 分层退出没有通过: ${esc_line:-没有输出}"; exit 1; }
+echo "RELEASE: ${esc_line}"
+
 # 每个模拟状态启动一次应用，打开面板后真实截屏（菜单栏 + 面板），深浅两套；悬停取最高的柱子。
 # 用法：shots/<名字>-<深浅>.png；名字 = 模拟数据-页签[-区间]
 # 菜单栏跟随系统外观，所以要真的切换系统深浅色再截（应用内也同步 --debug-appearance）。
@@ -158,7 +174,7 @@ assert_panel_size() {
   local log="$1" height="$2" size
   size=$(awk '/^DEBUG_RECT_PANEL/{split($2, rect, ","); print rect[3] "," rect[4]}' "$log" | tail -n 1)
   [[ "$size" == "400,$height" ]] \
-    || { echo "::error::主面板预期 400×${height}pt，实测 $size（$log）"; return 1; }
+    || { echo "::error::主面板预期 400×${height}pt，实测 ${size}（${log}）"; return 1; }
 }
 for ap in dark light; do
   if [ "$ap" = dark ]; then set_dark true; else set_dark false; fi
